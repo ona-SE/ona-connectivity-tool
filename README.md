@@ -17,12 +17,12 @@ This tool identifies these issues upfront with actionable remediation steps.
 
 ```bash
 # Download and run
-curl -O https://raw.githubusercontent.com/gitpod-io/SE-tool/main/ona-network-diagnostic/ona-network-check.py
+curl -O https://raw.githubusercontent.com/ona-SE/ona-connectivity-tool/main/ona-network-check.py
 python3 ona-network-check.py
 
 # Or clone and run
-git clone https://github.com/gitpod-io/SE-tool.git
-cd SE-tool/ona-network-diagnostic
+git clone https://github.com/ona-SE/ona-connectivity-tool.git
+cd ona-connectivity-tool
 python3 ona-network-check.py
 ```
 
@@ -170,4 +170,4 @@ Output structure:
 
 ## Contributing
 
-This tool is maintained by the Ona Sales Engineering team. For issues or feature requests, contact SE support.
+This tool is maintained by the Ona Sales Engineering team. For issues or feature requests, open an issue at [github.com/ona-SE/ona-connectivity-tool](https://github.com/ona-SE/ona-connectivity-tool/issues).
