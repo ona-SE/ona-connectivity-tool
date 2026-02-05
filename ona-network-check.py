@@ -288,6 +288,68 @@ def prompt_for_scm() -> List[str]:
     return scm_urls
 
 
+def prompt_for_internal_registry() -> Optional[str]:
+    """Prompt user for their internal container registry."""
+    print("\n" + "─" * 66)
+    print("Internal Container Registry Configuration")
+    print("─" * 66)
+    print("\nDoes your organization host container images internally?")
+    print("  1. JFrog Artifactory")
+    print("  2. Nexus Repository")
+    print("  3. Harbor")
+    print("  4. AWS ECR (private)")
+    print("  5. Other internal registry")
+    print("  6. No / Use public registries only")
+    print()
+    
+    try:
+        choice = input("Enter choice (1-6): ").strip()
+        
+        if choice == "1":
+            url = input("  Enter Artifactory URL (e.g., artifactory.mycompany.com): ").strip()
+            if url:
+                if not url.startswith("http"):
+                    url = f"https://{url}"
+                print(f"\n  Testing: {url}\n")
+                return url
+        elif choice == "2":
+            url = input("  Enter Nexus URL (e.g., nexus.mycompany.com): ").strip()
+            if url:
+                if not url.startswith("http"):
+                    url = f"https://{url}"
+                print(f"\n  Testing: {url}\n")
+                return url
+        elif choice == "3":
+            url = input("  Enter Harbor URL (e.g., harbor.mycompany.com): ").strip()
+            if url:
+                if not url.startswith("http"):
+                    url = f"https://{url}"
+                print(f"\n  Testing: {url}\n")
+                return url
+        elif choice == "4":
+            url = input("  Enter ECR URL (e.g., 123456789.dkr.ecr.us-east-1.amazonaws.com): ").strip()
+            if url:
+                if not url.startswith("http"):
+                    url = f"https://{url}"
+                print(f"\n  Testing: {url}\n")
+                return url
+        elif choice == "5":
+            url = input("  Enter registry URL: ").strip()
+            if url:
+                if not url.startswith("http"):
+                    url = f"https://{url}"
+                print(f"\n  Testing: {url}\n")
+                return url
+        elif choice == "6" or not choice:
+            print("  Using public registries only.")
+            return None
+    except (EOFError, KeyboardInterrupt):
+        print("\n  Skipping internal registry tests.")
+        return None
+    
+    return None
+
+
 def prompt_for_sso() -> Optional[str]:
     """Prompt user for their SSO provider URL."""
     print("\n" + "─" * 66)
@@ -683,11 +745,30 @@ def run_tests(args) -> List[TestCategory]:
         cat.tests.append(test_endpoint(url))
     categories.append(cat)
     
-    # Container registries
+    # Container registries (public)
     cat = TestCategory(name="Container Registries")
     for url in get_registry_endpoints():
         cat.tests.append(test_endpoint(url))
     categories.append(cat)
+    
+    # Internal container registry
+    internal_registry = args.internal_registry if hasattr(args, 'internal_registry') and args.internal_registry else prompt_for_internal_registry()
+    if internal_registry:
+        cat = TestCategory(name="Internal Container Registry")
+        result = test_endpoint(internal_registry, allow_4xx=True)
+        if result.status == "fail":
+            result.remediation = Remediation(
+                impact="Cannot pull container images from internal registry",
+                steps=[
+                    "Verify the registry URL is correct",
+                    "Ensure the registry is accessible from this network",
+                    "Check if VPN or private link is required",
+                    "Verify firewall allows outbound to registry"
+                ],
+                reference="https://ona.com/docs/ona/runners/aws/detailed-access-requirements#container-registries"
+            )
+        cat.tests.append(result)
+        categories.append(cat)
     
     # AWS Services
     if not args.skip_aws and args.aws_context.region:
@@ -795,6 +876,7 @@ Examples:
     parser.add_argument("--account-id", help="AWS account ID (auto-detected if not provided)")
     parser.add_argument("--scm", action="append", help="SCM provider URL (can specify multiple)")
     parser.add_argument("--sso", help="SSO provider URL (e.g., mycompany.okta.com)")
+    parser.add_argument("--internal-registry", dest="internal_registry", help="Internal container registry URL (e.g., artifactory.mycompany.com)")
     parser.add_argument("--skip-aws", action="store_true", help="Skip AWS endpoint tests")
     parser.add_argument("--skip-jetbrains", action="store_true", help="Skip JetBrains tests")
     parser.add_argument("--skip-vscode", action="store_true", help="Skip VS Code tests")
