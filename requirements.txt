@@ -1,0 +1,4 @@
+# Optional dependencies for enhanced output
+# The tool works without these, but output will be plain text with basic ANSI colors
+
+rich>=10.0.0  # Colored terminal output with progress bars and panels
