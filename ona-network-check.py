@@ -223,6 +223,122 @@ def print_summary(categories: List[TestCategory]):
 
 
 # =============================================================================
+# Interactive Prompts
+# =============================================================================
+
+def prompt_for_scm() -> List[str]:
+    """Prompt user for their SCM provider(s)."""
+    print("\n" + "─" * 66)
+    print("Source Control Configuration")
+    print("─" * 66)
+    print("\nWhich source control provider(s) does your organization use?")
+    print("  1. GitHub (github.com)")
+    print("  2. GitHub Enterprise (self-hosted)")
+    print("  3. GitLab (gitlab.com)")
+    print("  4. GitLab Self-Managed")
+    print("  5. Bitbucket Cloud (bitbucket.org)")
+    print("  6. Azure DevOps (dev.azure.com)")
+    print("  7. Other / Custom")
+    print("  8. Skip SCM tests")
+    print()
+    
+    scm_urls = []
+    
+    try:
+        choice = input("Enter choice (1-8), or comma-separated for multiple (e.g., 1,4): ").strip()
+        
+        if not choice:
+            choice = "1"  # Default to GitHub
+        
+        choices = [c.strip() for c in choice.split(",")]
+        
+        for c in choices:
+            if c == "1":
+                scm_urls.append("github.com")
+            elif c == "2":
+                url = input("  Enter GitHub Enterprise URL (e.g., github.mycompany.com): ").strip()
+                if url:
+                    scm_urls.append(url)
+            elif c == "3":
+                scm_urls.append("gitlab.com")
+            elif c == "4":
+                url = input("  Enter GitLab URL (e.g., gitlab.mycompany.com): ").strip()
+                if url:
+                    scm_urls.append(url)
+            elif c == "5":
+                scm_urls.append("bitbucket.org")
+            elif c == "6":
+                scm_urls.append("dev.azure.com")
+            elif c == "7":
+                url = input("  Enter custom SCM URL: ").strip()
+                if url:
+                    scm_urls.append(url)
+            elif c == "8":
+                print("  Skipping SCM tests.")
+                return []
+    except (EOFError, KeyboardInterrupt):
+        print("\n  Using default: github.com")
+        return ["github.com"]
+    
+    if not scm_urls:
+        print("  No SCM specified, using default: github.com")
+        scm_urls = ["github.com"]
+    
+    print(f"\n  Testing: {', '.join(scm_urls)}\n")
+    return scm_urls
+
+
+def prompt_for_sso() -> Optional[str]:
+    """Prompt user for their SSO provider URL."""
+    print("\n" + "─" * 66)
+    print("SSO Provider Configuration")
+    print("─" * 66)
+    print("\nDoes your organization use an SSO provider for Ona authentication?")
+    print("  1. Okta")
+    print("  2. Azure AD / Entra ID")
+    print("  3. Google Workspace")
+    print("  4. Other SSO provider")
+    print("  5. No SSO / Skip SSO tests")
+    print()
+    
+    try:
+        choice = input("Enter choice (1-5): ").strip()
+        
+        if choice == "1":
+            url = input("  Enter Okta domain (e.g., mycompany.okta.com): ").strip()
+            if url:
+                if not url.startswith("http"):
+                    url = f"https://{url}"
+                print(f"\n  Testing: {url}\n")
+                return url
+        elif choice == "2":
+            url = input("  Enter Azure AD tenant URL (e.g., login.microsoftonline.com/tenant-id): ").strip()
+            if url:
+                if not url.startswith("http"):
+                    url = f"https://{url}"
+                print(f"\n  Testing: {url}\n")
+                return url
+        elif choice == "3":
+            print("\n  Testing: accounts.google.com\n")
+            return "https://accounts.google.com"
+        elif choice == "4":
+            url = input("  Enter SSO provider URL: ").strip()
+            if url:
+                if not url.startswith("http"):
+                    url = f"https://{url}"
+                print(f"\n  Testing: {url}\n")
+                return url
+        elif choice == "5" or not choice:
+            print("  Skipping SSO tests.")
+            return None
+    except (EOFError, KeyboardInterrupt):
+        print("\n  Skipping SSO tests.")
+        return None
+    
+    return None
+
+
+# =============================================================================
 # AWS Context Detection
 # =============================================================================
 
@@ -592,14 +708,39 @@ def run_tests(args) -> List[TestCategory]:
         categories.append(cat)
     
     # SCM Providers
-    scm_urls = args.scm if args.scm else ["github.com"]
-    cat = TestCategory(name="SCM Providers")
-    for scm in scm_urls:
-        url = f"https://{scm}" if not scm.startswith("http") else scm
-        cat.tests.append(test_endpoint(url))
-        if "github.com" in scm:
-            cat.tests.append(test_endpoint("https://api.github.com"))
-    categories.append(cat)
+    scm_urls = args.scm if args.scm else prompt_for_scm()
+    if scm_urls:
+        cat = TestCategory(name="SCM Providers")
+        for scm in scm_urls:
+            url = f"https://{scm}" if not scm.startswith("http") else scm
+            cat.tests.append(test_endpoint(url))
+            # Also test API endpoints for known providers
+            if "github.com" in scm:
+                cat.tests.append(test_endpoint("https://api.github.com"))
+            elif "gitlab" in scm.lower():
+                api_url = f"https://{scm}/api/v4/projects" if not scm.startswith("http") else f"{scm}/api/v4/projects"
+                cat.tests.append(test_endpoint(api_url, allow_4xx=True))
+            elif "bitbucket" in scm.lower():
+                cat.tests.append(test_endpoint("https://api.bitbucket.org"))
+        categories.append(cat)
+    
+    # SSO Provider
+    sso_url = args.sso if hasattr(args, 'sso') and args.sso else prompt_for_sso()
+    if sso_url:
+        cat = TestCategory(name="SSO Provider")
+        result = test_endpoint(sso_url, allow_4xx=True)
+        if result.status == "fail":
+            result.remediation = Remediation(
+                impact="Users won't be able to authenticate via SSO",
+                steps=[
+                    "Add SSO provider domain to firewall allowlist",
+                    "Ensure HTTPS (port 443) outbound is permitted",
+                    "Check if proxy allows connections to SSO provider"
+                ],
+                reference="https://ona.com/docs/ona/sso/overview"
+            )
+        cat.tests.append(result)
+        categories.append(cat)
     
     return categories
 
@@ -653,6 +794,7 @@ Examples:
     parser.add_argument("--region", help="AWS region (auto-detected if not provided)")
     parser.add_argument("--account-id", help="AWS account ID (auto-detected if not provided)")
     parser.add_argument("--scm", action="append", help="SCM provider URL (can specify multiple)")
+    parser.add_argument("--sso", help="SSO provider URL (e.g., mycompany.okta.com)")
     parser.add_argument("--skip-aws", action="store_true", help="Skip AWS endpoint tests")
     parser.add_argument("--skip-jetbrains", action="store_true", help="Skip JetBrains tests")
     parser.add_argument("--skip-vscode", action="store_true", help="Skip VS Code tests")
