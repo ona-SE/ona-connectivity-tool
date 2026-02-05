@@ -96,6 +96,7 @@ class PlainOutput:
     RED = "\033[91m"
     YELLOW = "\033[93m"
     BLUE = "\033[94m"
+    CYAN = "\033[96m"
     BOLD = "\033[1m"
     RESET = "\033[0m"
     
@@ -113,11 +114,19 @@ class PlainOutput:
     
     @staticmethod
     def info(msg: str) -> str:
-        return f"{PlainOutput.BLUE}{msg}{PlainOutput.RESET}"
+        return f"{PlainOutput.CYAN}ℹ️  {msg}{PlainOutput.RESET}"
     
     @staticmethod
     def bold(msg: str) -> str:
         return f"{PlainOutput.BOLD}{msg}{PlainOutput.RESET}"
+
+
+def print_info(msg: str):
+    """Print an info message."""
+    if RICH_AVAILABLE:
+        console.print(f"[cyan]ℹ️  {msg}[/cyan]")
+    else:
+        print(PlainOutput.info(msg))
 
 
 def print_header():
@@ -693,7 +702,11 @@ def get_registry_endpoints() -> List[str]:
 
 
 def get_aws_endpoints(region: str) -> List[str]:
-    services = ["ec2", "s3", "ssm", "sts", "ecs", "logs", "secretsmanager"]
+    services = [
+        "ec2", "s3", "ssm", "sts", "ecs", "logs", "secretsmanager",
+        "autoscaling", "kms", "firehose", "eks", "cloudformation",
+        "elasticloadbalancing", "ecr.api", "ssmmessages", "ec2messages"
+    ]
     return [f"https://{svc}.{region}.amazonaws.com" for svc in services]
 
 
@@ -823,6 +836,26 @@ def run_tests(args) -> List[TestCategory]:
         cat.tests.append(result)
         categories.append(cat)
     
+    # Custom URLs (--test-url)
+    if hasattr(args, 'test_urls') and args.test_urls:
+        cat = TestCategory(name="Custom URLs")
+        for url in args.test_urls:
+            if not url.startswith("http"):
+                url = f"https://{url}"
+            result = test_endpoint(url, allow_4xx=True)
+            if result.status == "fail":
+                result.remediation = Remediation(
+                    impact="This URL is not reachable from this network",
+                    steps=[
+                        "Verify the URL is correct",
+                        "Add this domain to firewall allowlist",
+                        "Check if VPN or private link is required"
+                    ],
+                    reference="https://ona.com/docs/ona/runners/aws/detailed-access-requirements"
+                )
+            cat.tests.append(result)
+        categories.append(cat)
+    
     return categories
 
 
@@ -877,6 +910,7 @@ Examples:
     parser.add_argument("--scm", action="append", help="SCM provider URL (can specify multiple)")
     parser.add_argument("--sso", help="SSO provider URL (e.g., mycompany.okta.com)")
     parser.add_argument("--internal-registry", dest="internal_registry", help="Internal container registry URL (e.g., artifactory.mycompany.com)")
+    parser.add_argument("--test-url", action="append", dest="test_urls", help="Additional URL to test (can specify multiple)")
     parser.add_argument("--skip-aws", action="store_true", help="Skip AWS endpoint tests")
     parser.add_argument("--skip-jetbrains", action="store_true", help="Skip JetBrains tests")
     parser.add_argument("--skip-vscode", action="store_true", help="Skip VS Code tests")
@@ -894,14 +928,14 @@ def main():
     args.aws_context = detect_aws_context(args)
     
     if args.aws_context.region:
-        print(f"\nAWS Context:")
-        print(f"  Region: {args.aws_context.region} ({args.aws_context.detection_method})")
+        print_info(f"AWS region: {args.aws_context.region} (detected via {args.aws_context.detection_method})")
         if args.aws_context.account_id:
-            print(f"  Account: {args.aws_context.account_id}")
+            print_info(f"AWS account: {args.aws_context.account_id}")
     elif not args.skip_aws:
         print("\n⚠️  AWS region not detected. Use --region or --skip-aws")
     
     # Run tests
+    print_info("Starting connectivity tests...")
     categories = run_tests(args)
     
     # Print results
