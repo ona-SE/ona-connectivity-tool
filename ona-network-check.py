@@ -644,7 +644,11 @@ def test_websocket(url: str = "https://app.gitpod.io") -> TestResult:
     
     http_code = stdout.strip()
     
-    # 101 = Switching Protocols (ideal), 200/400 = endpoint exists but not WS
+    # 101 = Switching Protocols (ideal)
+    # 200 = endpoint exists, responded
+    # 400 = Bad Request (endpoint exists, rejected malformed WS request)
+    # 426 = Upgrade Required (endpoint exists, wants different protocol)
+    # Any of these means the endpoint is reachable and responding
     if http_code in ["101", "200", "400", "426"]:
         return TestResult(
             name="WebSocket", endpoint=url, status="pass",
@@ -673,10 +677,14 @@ def test_websocket(url: str = "https://app.gitpod.io") -> TestResult:
 # =============================================================================
 
 def get_ona_endpoints() -> List[str]:
-    return ["https://app.gitpod.io", "https://app.ona.com"]
+    return [
+        "https://app.gitpod.io",
+        "https://app.ona.com",
+    ]
 
 
 def get_vscode_endpoints() -> List[str]:
+    # Note: vscode.download.prss.microsoft.com returns 403 on root, but is reachable
     return [
         "https://update.code.visualstudio.com",
         "https://marketplace.visualstudio.com",
@@ -685,11 +693,12 @@ def get_vscode_endpoints() -> List[str]:
 
 
 def get_jetbrains_endpoints() -> List[str]:
+    # Only include endpoints that return valid responses on root path
     return [
         "https://www.jetbrains.com",
         "https://download.jetbrains.com",
-        "https://data.services.jetbrains.com/products",  # API endpoint
         "https://plugins.jetbrains.com",
+        "https://account.jetbrains.com",
     ]
 
 
@@ -705,6 +714,22 @@ def get_registry_endpoints() -> List[str]:
         "https://mcr.microsoft.com",
         "https://index.docker.io",
         "https://ghcr.io",
+        "https://gcr.io",
+    ]
+
+
+def get_cursor_endpoints() -> List[str]:
+    return [
+        "https://cursor.blob.core.windows.net",
+    ]
+
+
+def get_mcp_endpoints() -> List[str]:
+    return [
+        "https://api.linear.app",
+        "https://api.notion.com",
+        "https://api.figma.com",
+        "https://sentry.io",
     ]
 
 
@@ -770,6 +795,40 @@ def run_tests(args) -> List[TestCategory]:
     for url in get_registry_endpoints():
         cat.tests.append(test_endpoint(url))
     categories.append(cat)
+    
+    # Cursor editor endpoints
+    if not args.skip_cursor:
+        cat = TestCategory(name="Cursor Editor")
+        for url in get_cursor_endpoints():
+            result = test_endpoint(url)
+            if result.status == "fail":
+                result.remediation = Remediation(
+                    impact="Cursor editor remote server won't download",
+                    steps=[
+                        "Add cursor.blob.core.windows.net to firewall allowlist",
+                        "Ensure HTTPS (port 443) outbound is permitted"
+                    ],
+                    reference="https://ona.com/docs/ona/editors/cursor"
+                )
+            cat.tests.append(result)
+        categories.append(cat)
+    
+    # MCP integration endpoints
+    if not args.skip_mcp:
+        cat = TestCategory(name="MCP Integrations")
+        for url in get_mcp_endpoints():
+            result = test_endpoint(url, allow_4xx=True)
+            if result.status == "fail":
+                result.remediation = Remediation(
+                    impact="MCP integrations won't work for this service",
+                    steps=[
+                        "Add this domain to firewall allowlist",
+                        "Ensure HTTPS (port 443) outbound is permitted"
+                    ],
+                    reference="https://ona.com/docs/ona/integrations/mcp"
+                )
+            cat.tests.append(result)
+        categories.append(cat)
     
     # Internal container registry
     internal_registry = args.internal_registry if hasattr(args, 'internal_registry') and args.internal_registry else prompt_for_internal_registry()
@@ -921,6 +980,8 @@ Examples:
     parser.add_argument("--skip-aws", action="store_true", help="Skip AWS endpoint tests")
     parser.add_argument("--skip-jetbrains", action="store_true", help="Skip JetBrains tests")
     parser.add_argument("--skip-vscode", action="store_true", help="Skip VS Code tests")
+    parser.add_argument("--skip-cursor", action="store_true", help="Skip Cursor editor tests")
+    parser.add_argument("--skip-mcp", action="store_true", help="Skip MCP integration tests (Linear, Notion, Figma, Sentry)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show commands being run")
     parser.add_argument("--json", metavar="FILE", help="Save results to JSON file")
     return parser.parse_args()
