@@ -2,6 +2,27 @@
 
 Pre-deployment connectivity checker for Ona runners. Identifies network issues before they cause deployment failures.
 
+## Two Versions Available
+
+This tool is available in both **Python** and **Bash** versions with ~95% feature parity:
+
+| Feature | Python | Bash |
+|---------|--------|------|
+| All connectivity tests | ✅ | ✅ |
+| JSON reports | ✅ | ✅ |
+| Interactive prompts | ✅ | ✅ |
+| Remediation guidance | ✅ | ✅ |
+| Output formatting | Rich library (tables, progress) | ANSI colors |
+| Dependencies | Python 3.6+, curl, openssl | bash, curl, openssl, bc |
+| Startup time | ~100ms | ~10ms |
+| Memory usage | ~30-50MB | ~5-10MB |
+
+**Choose Python if:** You want enhanced output (tables, progress bars) or Python is already available.
+
+**Choose Bash if:** You're in minimal environments, want faster startup, or Python is not available.
+
+📖 See [COMPARISON.md](COMPARISON.md) for detailed feature comparison and [BASH_ARGUMENTS.md](BASH_ARGUMENTS.md) for bash-specific documentation.
+
 ## Problem
 
 During Ona runner deployment, connectivity issues are difficult to diagnose. Customers often have network security tools (Zscaler, corporate firewalls, proxy servers) that interfere with required connections:
@@ -15,6 +36,8 @@ This tool identifies these issues upfront with actionable remediation steps.
 
 ## Quick Start
 
+### Python Version
+
 ```bash
 # Download and run
 curl -O https://raw.githubusercontent.com/ona-SE/ona-connectivity-tool/main/ona-network-check.py
@@ -26,7 +49,24 @@ cd ona-connectivity-tool
 python3 ona-network-check.py
 ```
 
+### Bash Version
+
+```bash
+# Download and run
+curl -O https://raw.githubusercontent.com/ona-SE/ona-connectivity-tool/main/ona-network-check.sh
+chmod +x ona-network-check.sh
+./ona-network-check.sh
+
+# Or clone and run
+git clone https://github.com/ona-SE/ona-connectivity-tool.git
+cd ona-connectivity-tool
+chmod +x ona-network-check.sh
+./ona-network-check.sh
+```
+
 ## Requirements
+
+### Python Version
 
 **Required:**
 - Python 3.6+
@@ -38,27 +78,52 @@ python3 ona-network-check.py
 pip install rich
 ```
 
+### Bash Version
+
+**Required:**
+- bash 4.0+
+- curl (with HTTP/2 support)
+- openssl
+- bc (for latency calculation, optional)
+
+**Optional:**
+- aws CLI (for AWS account ID detection)
+
 ## Usage
+
+Both versions support the same CLI arguments and produce identical JSON output:
 
 ```bash
 # Run all tests with auto-detection
 python3 ona-network-check.py
+./ona-network-check.sh
 
 # Specify AWS region
 python3 ona-network-check.py --region us-east-1
+./ona-network-check.sh --region us-east-1
 
 # Test specific SCM providers
 python3 ona-network-check.py --scm github.com --scm gitlab.company.com
+./ona-network-check.sh --scm github.com --scm gitlab.company.com
+
+# Test SSO and internal registry
+python3 ona-network-check.py --sso company.okta.com --internal-registry artifactory.company.com
+./ona-network-check.sh --sso company.okta.com --internal-registry artifactory.company.com
 
 # Skip certain test categories
 python3 ona-network-check.py --skip-jetbrains --skip-aws
+./ona-network-check.sh --skip-jetbrains --skip-aws
 
 # Show commands being executed (for transparency)
 python3 ona-network-check.py --verbose
+./ona-network-check.sh --verbose
 
-# Save results to JSON
+# Save results to JSON (identical format)
 python3 ona-network-check.py --json results.json
+./ona-network-check.sh --json results.json
 ```
+
+📖 For complete argument documentation, see [BASH_ARGUMENTS.md](BASH_ARGUMENTS.md)
 
 ## What It Tests
 
