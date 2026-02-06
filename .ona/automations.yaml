@@ -1,0 +1,8 @@
+tasks:
+  installDeps:
+    name: Install dependencies
+    description: Install Python dependencies from requirements.txt.
+    command: |
+      pip install -r requirements.txt
+    triggeredBy:
+      - postDevcontainerStart

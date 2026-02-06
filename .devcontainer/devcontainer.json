@@ -1,0 +1,4 @@
+{
+  "name": "Ona Connectivity Tool",
+  "image": "mcr.microsoft.com/devcontainers/python:3"
+}
