@@ -579,16 +579,23 @@ def test_http2(url: str = "https://app.gitpod.io") -> TestResult:
 
 def test_ssl_certificate(host: str = "app.gitpod.io") -> TestResult:
     """Test SSL certificate chain for interception."""
-    cmd = ["openssl", "s_client", "-connect", f"{host}:443", "-servername", host]
+    # Use bash to pipe /dev/null to openssl so it doesn't hang waiting for input
+    cmd = ["bash", "-c", f"echo | openssl s_client -connect {host}:443 -servername {host} 2>&1"]
     code, stdout, stderr, latency = run_command(cmd, timeout=10)
-    cmd_str = f"openssl s_client -connect {host}:443 -servername {host} | openssl x509 -noout -issuer"
+    cmd_str = f"openssl s_client -connect {host}:443 -servername {host}"
     
-    # Parse issuer from output
+    # Parse issuer from output - look for the issuer= line
     issuer = "Unknown"
-    for line in (stdout + stderr).split("\n"):
-        if "issuer=" in line.lower() or "i:" in line:
-            issuer = line.strip()
+    output = stdout + stderr
+    for line in output.split("\n"):
+        line_stripped = line.strip()
+        # Look for "issuer=" line (most reliable)
+        if line_stripped.startswith("issuer="):
+            issuer = line_stripped
             break
+        # Fallback: look for "i:" lines in certificate chain
+        elif line_stripped.startswith("i:") and issuer == "Unknown":
+            issuer = line_stripped
     
     # Known intercepting proxies
     interceptors = ["zscaler", "palo alto", "fortinet", "blue coat", "symantec"]
