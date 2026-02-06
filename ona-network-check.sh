@@ -43,6 +43,8 @@ ACCOUNT_ID=""
 SKIP_AWS=0
 SKIP_VSCODE=0
 SKIP_JETBRAINS=0
+SKIP_CURSOR=0
+SKIP_MCP=0
 SCM_URLS=()
 SSO_URL=""
 INTERNAL_REGISTRY=""
@@ -263,27 +265,53 @@ test_ssl_certificate() {
     output=$(echo | openssl s_client -connect "$url:443" -servername "$url" 2>&1)
     local exit_code=$?
     
-    local remediation_steps="Check if corporate proxy is intercepting SSL|Install corporate CA certificates if required|Verify system time is correct"
+    local zscaler_remediation="Add $url to SSL inspection bypass list|Alternative: Enable 'System certificates' in VS Code (v1.97+)"
+    local general_remediation="Check if corporate proxy is intercepting SSL|Install corporate CA certificates if required|Verify system time is correct"
     
     if [ $exit_code -ne 0 ]; then
         print_test "SSL Certificate" "fail" "(connection failed)"
         store_test_result "SSL Certificate" "$url" "fail" "connection failed" "$cmd" "null" \
             "SSL/TLS errors, certificate validation failures" \
-            "$remediation_steps" \
+            "$general_remediation" \
             "https://ona.com/docs/ona/runners/aws/detailed-access-requirements"
         return 1
     fi
     
+    # Check for SSL interception by examining the certificate issuer
+    local issuer
+    issuer=$(echo "$output" | grep "issuer=" | head -1)
+    
+    # Known SSL intercepting proxies
+    if echo "$issuer" | grep -qi "zscaler\|palo alto\|fortinet\|blue coat\|symantec"; then
+        print_test "SSL Certificate" "fail" "(SSL interception detected)"
+        store_test_result "SSL Certificate" "$url" "fail" "SSL interception detected" "$cmd" "null" \
+            "VS Code can't connect, certificate verify failed errors" \
+            "$zscaler_remediation" \
+            "https://ona.com/docs/ona/runners/aws/troubleshooting-zscaler"
+        print_remediation "VS Code can't connect, certificate verify failed errors" \
+            "Add $url to SSL inspection bypass list" \
+            "Alternative: Enable 'System certificates' in VS Code (v1.97+)" \
+            "https://ona.com/docs/ona/runners/aws/troubleshooting-zscaler"
+        return 1
+    fi
+    
+    # Check if certificate is valid
     if echo "$output" | grep -q "Verify return code: 0 (ok)"; then
-        print_test "SSL Certificate" "pass" "(valid)"
-        store_test_result "SSL Certificate" "$url" "pass" "valid" "$cmd" "null" "" "" ""
+        # Check for known good issuers
+        if echo "$issuer" | grep -qi "amazon\|digicert\|let's encrypt\|google"; then
+            print_test "SSL Certificate" "pass" "(Certificate issuer verified, not intercepted)"
+            store_test_result "SSL Certificate" "$url" "pass" "Certificate issuer verified" "$cmd" "null" "" "" ""
+        else
+            print_test "SSL Certificate" "warn" "(Unknown issuer)"
+            store_test_result "SSL Certificate" "$url" "warn" "Unknown issuer" "$cmd" "null" "" "" ""
+        fi
         return 0
     else
         local error=$(echo "$output" | grep "Verify return code:" | head -1)
         print_test "SSL Certificate" "fail" "($error)"
         store_test_result "SSL Certificate" "$url" "fail" "$error" "$cmd" "null" \
             "SSL/TLS errors, certificate validation failures" \
-            "$remediation_steps" \
+            "$general_remediation" \
             "https://ona.com/docs/ona/runners/aws/detailed-access-requirements"
         print_remediation "SSL/TLS errors, certificate validation failures" \
             "Check if corporate proxy is intercepting SSL" \
@@ -322,15 +350,26 @@ test_websocket() {
         return 1
     fi
     
-    # 101 Switching Protocols or 4xx (endpoint exists) is acceptable
-    if [[ "$response" =~ ^(101|4) ]]; then
-        print_test "WebSocket Support" "pass" "(WebSocket enabled)"
-        store_test_result "WebSocket Support" "$url" "pass" "WebSocket enabled" "$cmd" "null" "" "" ""
+    # 101 = Switching Protocols (ideal)
+    # 200 = endpoint exists, responded
+    # 400 = Bad Request (endpoint exists, rejected malformed WS request)
+    # 426 = Upgrade Required (endpoint exists, wants different protocol)
+    # Any of these means the endpoint is reachable and responding
+    if [[ "$response" == "101" || "$response" == "200" || "$response" == "400" || "$response" == "426" ]]; then
+        print_test "WebSocket Support" "pass" "(WebSocket upgrade supported)"
+        store_test_result "WebSocket Support" "$url" "pass" "WebSocket upgrade supported" "$cmd" "null" "" "" ""
         return 0
     else
-        print_test "WebSocket Support" "warn" "(HTTP $response, may not support WebSocket)"
-        store_test_result "WebSocket Support" "$url" "warn" "HTTP $response, may not support WebSocket" "$cmd" "null" "" "" ""
-        return 0
+        print_test "WebSocket Support" "fail" "(HTTP $response, WebSocket blocked)"
+        store_test_result "WebSocket Support" "$url" "fail" "HTTP $response, WebSocket blocked" "$cmd" "null" \
+            "Real-time features won't work, environment status updates will fail" \
+            "$remediation_steps" \
+            "https://ona.com/docs/ona/runners/aws/detailed-access-requirements"
+        print_remediation "Real-time features won't work, environment status updates will fail" \
+            "Contact your proxy/firewall admin" \
+            "Enable WebSocket protocol (ws:// and wss://)" \
+            "Ensure proxy doesn't block Upgrade headers"
+        return 1
     fi
 }
 
@@ -340,30 +379,45 @@ test_websocket() {
 
 get_ona_endpoints() {
     echo "https://app.gitpod.io"
-    echo "https://api.gitpod.io"
-    echo "https://registry.gitpod.io"
+    echo "https://app.ona.com"
 }
 
 get_vscode_endpoints() {
-    echo "https://marketplace.visualstudio.com"
-    echo "https://vscode.download.prss.microsoft.com"
+    # Note: vscode.download.prss.microsoft.com returns 403 on root, but is reachable
     echo "https://update.code.visualstudio.com"
+    echo "https://marketplace.visualstudio.com"
+    echo "https://vscode.gitpod.io"
 }
 
 get_jetbrains_endpoints() {
+    # Only include endpoints that return valid responses on root path
+    echo "https://www.jetbrains.com"
     echo "https://download.jetbrains.com"
-    echo "https://cache-redirector.jetbrains.com"
+    echo "https://plugins.jetbrains.com"
+    echo "https://account.jetbrains.com"
 }
 
 get_release_endpoints() {
-    echo "https://github.com/gitpod-io/gitpod/releases"
-    echo "https://download.docker.com"
+    echo "https://releases.gitpod.io/ec2/stable/manifest.json"
+    echo "https://releases.gitpod.io/cli/stable/manifest.json"
 }
 
 get_registry_endpoints() {
-    echo "https://registry-1.docker.io"
-    echo "https://gcr.io"
+    echo "https://mcr.microsoft.com"
+    echo "https://index.docker.io"
     echo "https://ghcr.io"
+    echo "https://gcr.io"
+}
+
+get_cursor_endpoints() {
+    echo "https://cursor.blob.core.windows.net"
+}
+
+get_mcp_endpoints() {
+    echo "https://api.linear.app"
+    echo "https://api.notion.com"
+    echo "https://api.figma.com"
+    echo "https://sentry.io"
 }
 
 get_aws_endpoints() {
@@ -640,6 +694,26 @@ run_tests() {
         test_endpoint "$INTERNAL_REGISTRY" "true" "10" "Cannot pull container images from internal registry" "$remediation_steps" "$remediation_ref"
     fi
     
+    # Cursor editor endpoints
+    if [ "$SKIP_CURSOR" -eq 0 ]; then
+        print_header "Cursor Editor"
+        local remediation_steps="Add cursor.blob.core.windows.net to firewall allowlist|Ensure HTTPS (port 443) outbound is permitted"
+        local remediation_ref="https://ona.com/docs/ona/editors/cursor"
+        while IFS= read -r url; do
+            test_endpoint "$url" "false" "10" "Cursor editor remote server won't download" "$remediation_steps" "$remediation_ref"
+        done < <(get_cursor_endpoints)
+    fi
+    
+    # MCP integration endpoints
+    if [ "$SKIP_MCP" -eq 0 ]; then
+        print_header "MCP Integrations"
+        local remediation_steps="Add this domain to firewall allowlist|Ensure HTTPS (port 443) outbound is permitted"
+        local remediation_ref="https://ona.com/docs/ona/integrations/mcp"
+        while IFS= read -r url; do
+            test_endpoint "$url" "true" "10" "MCP integrations won't work for this service" "$remediation_steps" "$remediation_ref"
+        done < <(get_mcp_endpoints)
+    fi
+    
     # AWS Services
     if [ "$SKIP_AWS" -eq 0 ]; then
         if [ -n "$AWS_REGION_DETECTED" ]; then
@@ -801,6 +875,8 @@ Options:
   --skip-aws               Skip AWS endpoint tests
   --skip-vscode            Skip VS Code endpoint tests
   --skip-jetbrains         Skip JetBrains endpoint tests
+  --skip-cursor            Skip Cursor editor endpoint tests
+  --skip-mcp               Skip MCP integration tests (Linear, Notion, Figma, Sentry)
   --json FILE              Save results to JSON file
   --verbose                Enable verbose output
   --help                   Show this help message
@@ -854,6 +930,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-jetbrains)
             SKIP_JETBRAINS=1
+            shift
+            ;;
+        --skip-cursor)
+            SKIP_CURSOR=1
+            shift
+            ;;
+        --skip-mcp)
+            SKIP_MCP=1
             shift
             ;;
         --json)
