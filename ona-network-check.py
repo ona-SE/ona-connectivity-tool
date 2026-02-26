@@ -226,6 +226,11 @@ def print_summary(categories: List[TestCategory]):
     else:
         print("\n✅ All tests passed! Ready for runner deployment.")
     
+    # Post-deployment user connectivity note
+    print(f"\n⚠️  Note: Users must also be able to reach the runner from their machines.")
+    print("Ensure connectivity from user locations via VPN, Direct Connect, or Transit Gateway.")
+    print("Verify with:  nslookup <your-runner-domain> && curl -k https://<your-runner-domain>/_health")
+    
     print(f"\nDocumentation: https://ona.com/docs/ona/runners/aws/detailed-access-requirements")
     
     return failed
