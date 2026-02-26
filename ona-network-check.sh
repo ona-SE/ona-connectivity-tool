@@ -850,6 +850,12 @@ print_summary() {
         echo "✅ All tests passed! Ready for runner deployment."
     fi
     
+    # Post-deployment user connectivity note
+    echo ""
+    echo -e "${YELLOW}Note:${RESET} Users must also be able to reach the runner from their machines."
+    echo "Ensure connectivity from user locations via VPN, Direct Connect, or Transit Gateway."
+    echo "Verify with:  nslookup <your-runner-domain> && curl -k https://<your-runner-domain>/_health"
+    
     echo ""
     echo "Documentation: https://ona.com/docs/ona/runners/aws/detailed-access-requirements"
     echo ""
