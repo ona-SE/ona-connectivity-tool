@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Ona Network Connectivity Diagnostic Tool v1.0.0
+Ona Network Connectivity Diagnostic Tool v1.1.0
 
 Pre-deployment connectivity checker for Ona runners. Tests all required
 endpoints and validates protocol requirements (HTTP/2, WebSocket, SSL).
+Supports AWS and GCP cloud providers.
 
 Requirements:
 - Python 3.6+
@@ -15,10 +16,13 @@ Optional (for enhanced output):
 
 Usage:
   python3 ona-network-check.py
-  python3 ona-network-check.py --region us-east-1 --verbose
+  python3 ona-network-check.py --provider gcp --project-id my-project
+  python3 ona-network-check.py --provider aws --region us-east-1 --verbose
   python3 ona-network-check.py --scm github.com --scm gitlab.company.com
 
-Documentation: https://ona.com/docs/ona/runners/aws/detailed-access-requirements
+Documentation:
+  AWS: https://ona.com/docs/ona/runners/aws/detailed-access-requirements
+  GCP: https://ona.com/docs/ona/runners/gcp/detailed-access-requirements
 """
 
 import argparse
@@ -30,7 +34,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 # Try to import rich for colored output
 try:
@@ -82,6 +86,15 @@ class AWSContext:
     """AWS context information."""
     region: Optional[str] = None
     account_id: Optional[str] = None
+    detection_method: str = "none"
+
+
+@dataclass
+class GCPContext:
+    """GCP context information."""
+    project_id: Optional[str] = None
+    region: Optional[str] = None
+    zone: Optional[str] = None
     detection_method: str = "none"
 
 
@@ -198,7 +211,7 @@ def print_remediation(remediation: Remediation):
     print(f"     Reference: {remediation.reference}\n")
 
 
-def print_summary(categories: List[TestCategory]):
+def print_summary(categories: List[TestCategory], provider: str = "aws"):
     """Print the final summary."""
     total = sum(len(c.tests) for c in categories)
     passed = sum(1 for c in categories for t in c.tests if t.status == "pass")
@@ -231,7 +244,11 @@ def print_summary(categories: List[TestCategory]):
     print("Ensure connectivity from user locations via VPN, Direct Connect, or Transit Gateway.")
     print("Verify with:  nslookup <your-runner-domain> && curl -k https://<your-runner-domain>/_health")
     
-    print(f"\nDocumentation: https://ona.com/docs/ona/runners/aws/detailed-access-requirements")
+    # Provider-aware documentation links
+    if provider in ("aws", "both"):
+        print(f"\nAWS Documentation: https://ona.com/docs/ona/runners/aws/detailed-access-requirements")
+    if provider in ("gcp", "both"):
+        print(f"\nGCP Documentation: https://ona.com/docs/ona/runners/gcp/detailed-access-requirements")
     
     return failed
 
@@ -239,6 +256,37 @@ def print_summary(categories: List[TestCategory]):
 # =============================================================================
 # Interactive Prompts
 # =============================================================================
+
+def prompt_for_provider() -> str:
+    """Prompt user for their cloud provider."""
+    print("\n" + "─" * 66)
+    print("Cloud Provider")
+    print("─" * 66)
+    print("\nWhich cloud provider is your runner deployed on?")
+    print("  1. AWS")
+    print("  2. GCP")
+    print("  3. Both")
+    print("  4. Skip cloud-specific tests")
+    print()
+    
+    try:
+        choice = input("Enter choice (1-4): ").strip()
+        
+        if choice == "1":
+            return "aws"
+        elif choice == "2":
+            return "gcp"
+        elif choice == "3":
+            return "both"
+        elif choice == "4":
+            return "skip"
+        else:
+            print("  Invalid choice, defaulting to AWS.")
+            return "aws"
+    except (EOFError, KeyboardInterrupt):
+        print("\n  Defaulting to AWS.")
+        return "aws"
+
 
 def prompt_for_scm() -> List[str]:
     """Prompt user for their SCM provider(s)."""
@@ -312,12 +360,13 @@ def prompt_for_internal_registry() -> Optional[str]:
     print("  2. Nexus Repository")
     print("  3. Harbor")
     print("  4. AWS ECR (private)")
-    print("  5. Other internal registry")
-    print("  6. No / Use public registries only")
+    print("  5. Google Artifact Registry")
+    print("  6. Other internal registry")
+    print("  7. No / Use public registries only")
     print()
     
     try:
-        choice = input("Enter choice (1-6): ").strip()
+        choice = input("Enter choice (1-7): ").strip()
         
         if choice == "1":
             url = input("  Enter Artifactory URL (e.g., artifactory.mycompany.com): ").strip()
@@ -348,13 +397,20 @@ def prompt_for_internal_registry() -> Optional[str]:
                 print(f"\n  Testing: {url}\n")
                 return url
         elif choice == "5":
+            url = input("  Enter Artifact Registry URL (e.g., us-central1-docker.pkg.dev/my-project/my-repo): ").strip()
+            if url:
+                if not url.startswith("http"):
+                    url = f"https://{url}"
+                print(f"\n  Testing: {url}\n")
+                return url
+        elif choice == "6":
             url = input("  Enter registry URL: ").strip()
             if url:
                 if not url.startswith("http"):
                     url = f"https://{url}"
                 print(f"\n  Testing: {url}\n")
                 return url
-        elif choice == "6" or not choice:
+        elif choice == "7" or not choice:
             print("  Using public registries only.")
             return None
     except (EOFError, KeyboardInterrupt):
@@ -465,6 +521,135 @@ def detect_aws_context(args) -> AWSContext:
             pass
     
     return ctx
+
+
+# =============================================================================
+# GCP Context Detection
+# =============================================================================
+
+def detect_gcp_context(args) -> GCPContext:
+    """Detect GCP project, region, and zone from various sources."""
+    ctx = GCPContext()
+    
+    # Check for manual override first
+    if hasattr(args, 'project_id') and args.project_id:
+        ctx.project_id = args.project_id
+        ctx.detection_method = "cli_argument"
+    
+    if hasattr(args, 'gcp_region') and args.gcp_region:
+        ctx.region = args.gcp_region
+    
+    if ctx.project_id:
+        return ctx
+    
+    # Try environment variables
+    ctx.project_id = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GCLOUD_PROJECT")
+    if ctx.project_id:
+        ctx.detection_method = "environment_variable"
+        if not ctx.region:
+            ctx.region = os.environ.get("CLOUDSDK_COMPUTE_REGION")
+        if not ctx.zone:
+            ctx.zone = os.environ.get("CLOUDSDK_COMPUTE_ZONE")
+        return ctx
+    
+    # Try GCP metadata server (probe with Metadata-Flavor header)
+    try:
+        result = subprocess.run(
+            ["curl", "-s", "--connect-timeout", "2",
+             "-H", "Metadata-Flavor: Google",
+             "http://metadata.google.internal/computeMetadata/v1/project/project-id"],
+            capture_output=True, text=True, timeout=3
+        )
+        if result.returncode == 0 and result.stdout and not result.stdout.startswith("<!"):
+            ctx.project_id = result.stdout.strip()
+            ctx.detection_method = "metadata_server"
+            # Also try to get region/zone from metadata
+            try:
+                zone_result = subprocess.run(
+                    ["curl", "-s", "--connect-timeout", "2",
+                     "-H", "Metadata-Flavor: Google",
+                     "http://metadata.google.internal/computeMetadata/v1/instance/zone"],
+                    capture_output=True, text=True, timeout=3
+                )
+                if zone_result.returncode == 0 and zone_result.stdout:
+                    # Format: projects/PROJECT_NUM/zones/ZONE
+                    zone_path = zone_result.stdout.strip()
+                    ctx.zone = zone_path.split("/")[-1] if "/" in zone_path else zone_path
+                    # Derive region from zone (e.g., us-central1-a -> us-central1)
+                    if ctx.zone and not ctx.region:
+                        ctx.region = "-".join(ctx.zone.split("-")[:-1])
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                pass
+            return ctx
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    
+    # Try gcloud CLI
+    try:
+        result = subprocess.run(
+            ["gcloud", "config", "get-value", "project"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            ctx.project_id = result.stdout.strip()
+            ctx.detection_method = "gcloud_cli"
+            # Also try region
+            if not ctx.region:
+                try:
+                    region_result = subprocess.run(
+                        ["gcloud", "config", "get-value", "compute/region"],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    if region_result.returncode == 0 and region_result.stdout.strip():
+                        ctx.region = region_result.stdout.strip()
+                except (subprocess.TimeoutExpired, FileNotFoundError):
+                    pass
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    
+    return ctx
+
+
+def detect_provider(args) -> str:
+    """Auto-detect cloud provider from metadata services.
+    
+    GCP is probed first because both AWS and GCP metadata services live at
+    169.254.169.254. The GCP probe uses the Metadata-Flavor header which is
+    unambiguous.
+    """
+    detected = []
+    
+    # Probe GCP first (unambiguous due to Metadata-Flavor header)
+    try:
+        result = subprocess.run(
+            ["curl", "-s", "--connect-timeout", "2",
+             "-H", "Metadata-Flavor: Google",
+             "http://metadata.google.internal/computeMetadata/v1/project/project-id"],
+            capture_output=True, text=True, timeout=3
+        )
+        if result.returncode == 0 and result.stdout and not result.stdout.startswith("<!"):
+            detected.append("gcp")
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    
+    # Probe AWS
+    try:
+        result = subprocess.run(
+            ["curl", "-s", "--connect-timeout", "2",
+             "http://169.254.169.254/latest/meta-data/placement/region"],
+            capture_output=True, text=True, timeout=3
+        )
+        if result.returncode == 0 and result.stdout and not result.stdout.startswith("<?"):
+            detected.append("aws")
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    
+    if len(detected) == 2:
+        return "both"
+    elif len(detected) == 1:
+        return detected[0]
+    else:
+        return "skip"
 
 
 # =============================================================================
@@ -708,9 +893,16 @@ def get_jetbrains_endpoints() -> List[str]:
 
 
 def get_release_endpoints() -> List[str]:
+    """Cloud-agnostic release artifact endpoints."""
+    return [
+        "https://releases.gitpod.io/cli/stable/manifest.json",
+    ]
+
+
+def get_aws_release_endpoints() -> List[str]:
+    """AWS-specific release artifact endpoints."""
     return [
         "https://releases.gitpod.io/ec2/stable/manifest.json",
-        "https://releases.gitpod.io/cli/stable/manifest.json",
     ]
 
 
@@ -745,6 +937,156 @@ def get_aws_endpoints(region: str) -> List[str]:
         "elasticloadbalancing", "ecr.api", "ssmmessages", "ec2messages"
     ]
     return [f"https://{svc}.{region}.amazonaws.com" for svc in services]
+
+
+def get_gcp_endpoints() -> List[str]:
+    """GCP service endpoints (global, not regional)."""
+    services = [
+        # Core GCP Services
+        "compute.googleapis.com",
+        "storage.googleapis.com",
+        "artifactregistry.googleapis.com",
+        "secretmanager.googleapis.com",
+        "logging.googleapis.com",
+        "monitoring.googleapis.com",
+        # Supporting GCP Services
+        "redis.googleapis.com",
+        "run.googleapis.com",
+        "pubsub.googleapis.com",
+        "cloudfunctions.googleapis.com",
+        # Required APIs
+        "iam.googleapis.com",
+        "iamcredentials.googleapis.com",
+        "cloudresourcemanager.googleapis.com",
+        "vpcaccess.googleapis.com",
+        "servicenetworking.googleapis.com",
+        "cloudkms.googleapis.com",
+    ]
+    return [f"https://{svc}" for svc in services]
+
+
+def test_gcp_metadata() -> TestResult:
+    """Test GCP metadata service connectivity with required header."""
+    url = "http://metadata.google.internal/computeMetadata/v1/project/project-id"
+    cmd = ["curl", "-s", "--connect-timeout", "2",
+           "-H", "Metadata-Flavor: Google",
+           "-o", "/dev/null", "-w", "%{http_code} %{time_total}", url]
+    
+    code, stdout, stderr, _ = run_command(cmd, timeout=5)
+    cmd_str = 'curl -s -H "Metadata-Flavor: Google" ' + url
+    
+    if code != 0:
+        return TestResult(
+            name="GCP Metadata Service", endpoint="metadata.google.internal",
+            status="warn",
+            message="Metadata service not reachable (expected if not running on GCP VM)",
+            command=cmd_str
+        )
+    
+    parts = stdout.strip().split()
+    http_code = parts[0] if parts else "000"
+    latency = float(parts[1]) * 1000 if len(parts) > 1 else None
+    
+    if http_code.startswith("2"):
+        return TestResult(
+            name="GCP Metadata Service", endpoint="metadata.google.internal",
+            status="pass", message=f"Metadata service reachable ({http_code})",
+            command=cmd_str, latency_ms=latency
+        )
+    else:
+        return TestResult(
+            name="GCP Metadata Service", endpoint="metadata.google.internal",
+            status="fail", message=f"Metadata service returned HTTP {http_code}",
+            command=cmd_str, latency_ms=latency,
+            remediation=Remediation(
+                impact="VMs cannot access service account tokens or instance metadata",
+                steps=[
+                    "Ensure the GCP metadata server (169.254.169.254) is not blocked",
+                    "Verify firewall rules allow access to metadata.google.internal",
+                ],
+                reference="https://ona.com/docs/ona/runners/gcp/detailed-access-requirements"
+            )
+        )
+
+
+def test_gcp_image_access() -> List[TestResult]:
+    """Test access to required GCP VM images via gcloud CLI."""
+    results = []
+    
+    # Check if gcloud is available
+    try:
+        subprocess.run(["gcloud", "--version"], capture_output=True, timeout=5)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        results.append(TestResult(
+            name="GCP Image Access", endpoint="gcloud CLI",
+            status="warn",
+            message="gcloud CLI not available — cannot validate image access",
+            command="gcloud --version"
+        ))
+        return results
+    
+    # Test cos-cloud (public Google images) — fail if blocked
+    cmd_cos = ["gcloud", "compute", "images", "list",
+               "--project=cos-cloud", "--filter=family:cos-stable",
+               "--limit=1", "--format=value(name)"]
+    code, stdout, stderr, latency = run_command(cmd_cos, timeout=15)
+    cmd_str = " ".join(cmd_cos)
+    
+    if code == 0 and stdout.strip():
+        results.append(TestResult(
+            name="COS Image Access", endpoint="cos-cloud/cos-stable",
+            status="pass", message=f"Image accessible: {stdout.strip()[:40]}",
+            command=cmd_str, latency_ms=latency
+        ))
+    else:
+        results.append(TestResult(
+            name="COS Image Access", endpoint="cos-cloud/cos-stable",
+            status="fail",
+            message="Cannot access Container-Optimized OS images",
+            command=cmd_str, latency_ms=latency,
+            remediation=Remediation(
+                impact="Runner orchestrator VMs cannot be created",
+                steps=[
+                    "Add 'projects/cos-cloud' to your organization's compute.trustedImageProjects policy",
+                    "Run: gcloud resource-manager org-policies allow compute.trustedImageProjects projects/cos-cloud",
+                ],
+                reference="https://ona.com/docs/ona/runners/gcp/detailed-access-requirements"
+            )
+        ))
+    
+    # Test gitpod-next-production (Ona images) — warn if blocked (not publicly listable)
+    cmd_ona = ["gcloud", "compute", "images", "list",
+               "--project=gitpod-next-production",
+               "--filter=name~ona-environment", "--limit=1",
+               "--format=value(name)"]
+    code, stdout, stderr, latency = run_command(cmd_ona, timeout=15)
+    cmd_str = " ".join(cmd_ona)
+    
+    if code == 0 and stdout.strip():
+        results.append(TestResult(
+            name="Ona Environment Image Access",
+            endpoint="gitpod-next-production/ona-environment-*",
+            status="pass", message=f"Image accessible: {stdout.strip()[:40]}",
+            command=cmd_str, latency_ms=latency
+        ))
+    else:
+        results.append(TestResult(
+            name="Ona Environment Image Access",
+            endpoint="gitpod-next-production/ona-environment-*",
+            status="warn",
+            message="Cannot list Ona environment images (may not be publicly listable)",
+            command=cmd_str, latency_ms=latency,
+            remediation=Remediation(
+                impact="Environment VMs may fail to launch if org policy blocks this project",
+                steps=[
+                    "Add 'projects/gitpod-next-production' to your organization's compute.trustedImageProjects policy",
+                    "Contact Ona support if you need assistance with image access",
+                ],
+                reference="https://ona.com/docs/ona/runners/gcp/detailed-access-requirements"
+            )
+        ))
+    
+    return results
 
 
 # =============================================================================
@@ -856,7 +1198,7 @@ def run_tests(args) -> List[TestCategory]:
     
     # AWS Services
     if not args.skip_aws and args.aws_context.region:
-        cat = TestCategory(name="AWS Services")
+        cat = TestCategory(name=f"AWS Services (Region: {args.aws_context.region})")
         for url in get_aws_endpoints(args.aws_context.region):
             # AWS APIs return 4xx on unauthenticated requests - that's fine, endpoint is reachable
             result = test_endpoint(url, allow_4xx=True)
@@ -870,6 +1212,38 @@ def run_tests(args) -> List[TestCategory]:
                     reference="https://ona.com/docs/ona/runners/aws/vpc-endpoints"
                 )
             cat.tests.append(result)
+        # AWS-specific release artifact
+        for url in get_aws_release_endpoints():
+            cat.tests.append(test_endpoint(url))
+        categories.append(cat)
+    
+    # GCP Services
+    if not args.skip_gcp and args.gcp_context.project_id:
+        cat = TestCategory(name=f"GCP Services (Project: {args.gcp_context.project_id})")
+        for url in get_gcp_endpoints():
+            result = test_endpoint(url, allow_4xx=True)
+            if result.status == "fail":
+                # Extract service name for remediation
+                svc = url.replace("https://", "")
+                result.remediation = Remediation(
+                    impact="Runner deployment will fail, GCP resources won't be accessible",
+                    steps=[
+                        f"Enable the required API: gcloud services enable {svc}",
+                        "Ensure firewall rules allow outbound to GCP API endpoints",
+                    ],
+                    reference="https://ona.com/docs/ona/runners/gcp/detailed-access-requirements"
+                )
+            cat.tests.append(result)
+        categories.append(cat)
+        
+        # GCP Metadata Service
+        cat = TestCategory(name="GCP Metadata Service")
+        cat.tests.append(test_gcp_metadata())
+        categories.append(cat)
+        
+        # GCP Image Access
+        cat = TestCategory(name="GCP Image Access")
+        cat.tests.extend(test_gcp_image_access())
         categories.append(cat)
     
     # SCM Providers
@@ -930,12 +1304,15 @@ def run_tests(args) -> List[TestCategory]:
     return categories
 
 
-def save_json_report(categories: List[TestCategory], aws_ctx: AWSContext, filepath: str):
+def save_json_report(categories: List[TestCategory], aws_ctx: AWSContext,
+                     gcp_ctx: GCPContext, provider: str, filepath: str):
     """Save results to JSON file."""
     report = {
         "version": VERSION,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-        "aws_context": asdict(aws_ctx),
+        "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "provider": provider,
+        "aws_context": asdict(aws_ctx) if provider in ("aws", "both") else None,
+        "gcp_context": asdict(gcp_ctx) if provider in ("gcp", "both") else None,
         "summary": {
             "total": sum(len(c.tests) for c in categories),
             "passed": sum(1 for c in categories for t in c.tests if t.status == "pass"),
@@ -969,27 +1346,79 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s                              # Run all tests with auto-detection
-  %(prog)s --region us-east-1           # Specify AWS region
+  %(prog)s                                          # Run all tests with auto-detection
+  %(prog)s --provider aws --region us-east-1        # AWS with specific region
+  %(prog)s --provider gcp --project-id my-project   # GCP with specific project
+  %(prog)s --provider both                          # Test both providers
   %(prog)s --scm github.com --scm gitlab.company.com
-  %(prog)s --skip-jetbrains --verbose   # Skip JetBrains, show commands
+  %(prog)s --skip-jetbrains --verbose               # Skip JetBrains, show commands
         """
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    # Cloud provider selection
+    parser.add_argument("--provider", choices=["aws", "gcp", "both"],
+                        help="Cloud provider (aws, gcp, both). Auto-detected if not set.")
+    # AWS-specific
     parser.add_argument("--region", help="AWS region (auto-detected if not provided)")
     parser.add_argument("--account-id", help="AWS account ID (auto-detected if not provided)")
+    # GCP-specific
+    parser.add_argument("--project-id", dest="project_id",
+                        help="GCP project ID (auto-detected if not provided)")
+    parser.add_argument("--gcp-region", dest="gcp_region",
+                        help="GCP region (auto-detected if not provided)")
+    # Common options
     parser.add_argument("--scm", action="append", help="SCM provider URL (can specify multiple)")
     parser.add_argument("--sso", help="SSO provider URL (e.g., mycompany.okta.com)")
-    parser.add_argument("--internal-registry", dest="internal_registry", help="Internal container registry URL (e.g., artifactory.mycompany.com)")
-    parser.add_argument("--test-url", action="append", dest="test_urls", help="Additional URL to test (can specify multiple)")
+    parser.add_argument("--internal-registry", dest="internal_registry",
+                        help="Internal container registry URL")
+    parser.add_argument("--test-url", action="append", dest="test_urls",
+                        help="Additional URL to test (can specify multiple)")
     parser.add_argument("--skip-aws", action="store_true", help="Skip AWS endpoint tests")
+    parser.add_argument("--skip-gcp", action="store_true", help="Skip GCP endpoint tests")
     parser.add_argument("--skip-jetbrains", action="store_true", help="Skip JetBrains tests")
     parser.add_argument("--skip-vscode", action="store_true", help="Skip VS Code tests")
     parser.add_argument("--skip-cursor", action="store_true", help="Skip Cursor editor tests")
-    parser.add_argument("--skip-mcp", action="store_true", help="Skip MCP integration tests (Linear, Notion, Figma, Sentry)")
+    parser.add_argument("--skip-mcp", action="store_true",
+                        help="Skip MCP integration tests (Linear, Notion, Figma, Sentry)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show commands being run")
     parser.add_argument("--json", metavar="FILE", help="Save results to JSON file")
     return parser.parse_args()
+
+
+def resolve_provider(args) -> str:
+    """Determine which cloud provider(s) to test.
+    
+    Priority: --provider flag > --skip-* flags > interactive prompt > auto-detect.
+    """
+    # Explicit --provider flag takes precedence
+    if args.provider:
+        return args.provider
+    
+    # If both skip flags are set, skip cloud tests
+    if args.skip_aws and args.skip_gcp:
+        return "skip"
+    
+    # If one skip flag is set, use the other provider
+    if args.skip_aws and not args.skip_gcp:
+        return "gcp"
+    if args.skip_gcp and not args.skip_aws:
+        return "aws"
+    
+    # If cloud-specific CLI args are given, infer provider
+    if args.region or args.account_id:
+        if hasattr(args, 'project_id') and args.project_id:
+            return "both"
+        return "aws"
+    if hasattr(args, 'project_id') and args.project_id:
+        return "gcp"
+    
+    # Interactive prompt if stdin is a TTY
+    if sys.stdin.isatty():
+        return prompt_for_provider()
+    
+    # Non-interactive: auto-detect
+    print_info("Auto-detecting cloud provider...")
+    return detect_provider(args)
 
 
 def main():
@@ -997,15 +1426,52 @@ def main():
     
     print_header()
     
-    # Detect AWS context
-    args.aws_context = detect_aws_context(args)
+    # Determine provider
+    provider = resolve_provider(args)
     
-    if args.aws_context.region:
-        print_info(f"AWS region: {args.aws_context.region} (detected via {args.aws_context.detection_method})")
-        if args.aws_context.account_id:
-            print_info(f"AWS account: {args.aws_context.account_id}")
-    elif not args.skip_aws:
-        print("\n⚠️  AWS region not detected. Use --region or --skip-aws")
+    # Set skip flags based on resolved provider
+    if provider == "aws":
+        args.skip_aws = False
+        args.skip_gcp = True
+    elif provider == "gcp":
+        args.skip_aws = True
+        args.skip_gcp = False
+    elif provider == "both":
+        args.skip_aws = False
+        args.skip_gcp = False
+    elif provider == "skip":
+        args.skip_aws = True
+        args.skip_gcp = True
+    
+    # Detect AWS context
+    if not args.skip_aws:
+        args.aws_context = detect_aws_context(args)
+        if args.aws_context.region:
+            print_info(f"AWS region: {args.aws_context.region} (detected via {args.aws_context.detection_method})")
+            if args.aws_context.account_id:
+                print_info(f"AWS account: {args.aws_context.account_id}")
+        else:
+            if provider == "both":
+                print("\n⚠️  AWS region not detected — skipping AWS tests. Use --region to specify.")
+            else:
+                print("\n⚠️  AWS region not detected. Use --region or --skip-aws")
+    else:
+        args.aws_context = AWSContext()
+    
+    # Detect GCP context
+    if not args.skip_gcp:
+        args.gcp_context = detect_gcp_context(args)
+        if args.gcp_context.project_id:
+            print_info(f"GCP project: {args.gcp_context.project_id} (detected via {args.gcp_context.detection_method})")
+            if args.gcp_context.region:
+                print_info(f"GCP region: {args.gcp_context.region}")
+        else:
+            if provider == "both":
+                print("\n⚠️  GCP project not detected — skipping GCP tests. Use --project-id to specify.")
+            else:
+                print("\n⚠️  GCP project not detected. Use --project-id or --skip-gcp")
+    else:
+        args.gcp_context = GCPContext()
     
     # Run tests
     print_info("Starting connectivity tests...")
@@ -1019,11 +1485,12 @@ def main():
             print_result(result, args.verbose)
     
     # Print summary
-    failed = print_summary(categories)
+    failed = print_summary(categories, provider)
     
     # Save JSON if requested
     if args.json:
-        save_json_report(categories, args.aws_context, args.json)
+        save_json_report(categories, args.aws_context, args.gcp_context,
+                         provider, args.json)
     
     sys.exit(1 if failed > 0 else 0)
 

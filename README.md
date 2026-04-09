@@ -94,13 +94,14 @@ pip install rich
 Both versions support the same CLI arguments and produce identical JSON output:
 
 ```bash
-# Run all tests with auto-detection
+# Run all tests with auto-detection (prompts for cloud provider)
 python3 ona-network-check.py
 ./ona-network-check.sh
 
-# Specify AWS region
-python3 ona-network-check.py --region us-east-1
-./ona-network-check.sh --region us-east-1
+# Specify cloud provider explicitly
+python3 ona-network-check.py --provider aws --region us-east-1
+python3 ona-network-check.py --provider gcp --project-id my-project --gcp-region us-central1
+python3 ona-network-check.py --provider both --region us-east-1 --project-id my-project
 
 # Test specific SCM providers
 python3 ona-network-check.py --scm github.com --scm gitlab.company.com
@@ -111,7 +112,7 @@ python3 ona-network-check.py --sso company.okta.com --internal-registry artifact
 ./ona-network-check.sh --sso company.okta.com --internal-registry artifactory.company.com
 
 # Skip certain test categories
-python3 ona-network-check.py --skip-jetbrains --skip-aws
+python3 ona-network-check.py --skip-jetbrains --skip-gcp
 ./ona-network-check.sh --skip-jetbrains --skip-aws
 
 # Show commands being executed (for transparency)
@@ -136,9 +137,10 @@ python3 ona-network-check.py --json results.json
 - **Ona Management Plane**: app.gitpod.io, app.ona.com
 - **VS Code**: update.code.visualstudio.com, marketplace, CDN
 - **JetBrains**: downloads, plugins, services
-- **Release Artifacts**: releases.gitpod.io
-- **Container Registries**: MCR, Docker Hub, GHCR
-- **AWS Services**: Regional endpoints (EC2, S3, ECS, etc.)
+- **Release Artifacts**: releases.gitpod.io (cloud-agnostic CLI artifacts)
+- **Container Registries**: MCR, Docker Hub, GHCR, GCR
+- **AWS Services**: Regional endpoints (EC2, S3, ECS, etc.) + EC2 release manifest
+- **GCP Services**: Global endpoints (Compute, Storage, IAM, etc.) + metadata service + image access validation
 - **SCM Providers**: GitHub, GitLab, or custom
 
 ## Interpreting Results
@@ -191,14 +193,22 @@ python3 ona-network-check.py --json results.json
 ```
 **Fix**: Ensure WebSocket traffic is allowed through firewall, add app.gitpod.io to WebSocket allowlist.
 
-## AWS Context Detection
+## Cloud Provider Detection
 
-The tool automatically detects AWS region from:
+The tool supports AWS and GCP. Use `--provider aws|gcp|both` to select explicitly, or let the tool auto-detect.
+
+### AWS Context Detection
 1. `--region` CLI argument (highest priority)
 2. `AWS_REGION` or `AWS_DEFAULT_REGION` environment variables
 3. EC2 instance metadata (169.254.169.254)
 
-Use `--skip-aws` to skip AWS endpoint tests if not in an AWS context.
+### GCP Context Detection
+1. `--project-id` / `--gcp-region` CLI arguments (highest priority)
+2. `GOOGLE_CLOUD_PROJECT`, `CLOUDSDK_COMPUTE_REGION` environment variables
+3. GCP metadata server (`metadata.google.internal` with `Metadata-Flavor: Google` header)
+4. `gcloud config get-value project`
+
+Use `--skip-aws` or `--skip-gcp` to skip cloud-specific tests.
 
 ## JSON Output
 
@@ -211,26 +221,43 @@ python3 ona-network-check.py --json results.json
 Output structure:
 ```json
 {
-  "version": "1.0.0",
-  "timestamp": "2024-01-15T10:30:00Z",
-  "aws_context": {
-    "region": "us-east-1",
-    "detection_method": "instance_metadata"
+  "version": "1.1.0",
+  "timestamp": "2026-04-07T10:30:00Z",
+  "provider": "gcp",
+  "aws_context": null,
+  "gcp_context": {
+    "project_id": "my-project-123",
+    "region": "us-central1",
+    "zone": "us-central1-a",
+    "detection_method": "metadata_server"
   },
   "summary": {
-    "total": 19,
-    "passed": 18,
-    "failed": 1
+    "total": 31,
+    "passed": 28,
+    "failed": 1,
+    "warnings": 2
   },
-  "categories": [...]
+  "categories": [
+    {
+      "name": "GCP Services",
+      "tests": [...]
+    }
+  ]
 }
 ```
 
 ## Documentation
 
-- [Ona Access Requirements](https://ona.com/docs/ona/runners/aws/detailed-access-requirements)
+### AWS
+- [AWS Access Requirements](https://ona.com/docs/ona/runners/aws/detailed-access-requirements)
 - [Zscaler Troubleshooting](https://ona.com/docs/ona/runners/aws/troubleshooting-zscaler)
 - [VPC Endpoints](https://ona.com/docs/ona/runners/aws/vpc-endpoints)
+
+### GCP
+- [GCP Access Requirements](https://ona.com/docs/ona/runners/gcp/detailed-access-requirements)
+- [GCP Troubleshooting](https://ona.com/docs/ona/runners/gcp/troubleshooting-runners)
+
+### General
 - [JetBrains Network Requirements](https://ona.com/docs/ona/editors/jetbrains#network-access-requirements)
 
 ## Contributing

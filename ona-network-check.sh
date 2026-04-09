@@ -1,9 +1,10 @@
 #!/bin/bash
 #
-# Ona Network Connectivity Diagnostic Tool v1.0.0 (Bash Edition)
+# Ona Network Connectivity Diagnostic Tool v1.1.0 (Bash Edition)
 #
 # Pre-deployment connectivity checker for Ona runners. Tests required
 # endpoints and validates protocol requirements (HTTP/2, WebSocket, SSL).
+# Supports AWS and GCP cloud providers.
 #
 # Requirements:
 # - curl (with HTTP/2 support)
@@ -11,15 +12,18 @@
 #
 # Usage:
 #   ./ona-network-check.sh
-#   ./ona-network-check.sh --region us-east-1 --verbose
+#   ./ona-network-check.sh --provider gcp --project-id my-project
+#   ./ona-network-check.sh --provider aws --region us-east-1 --verbose
 #   ./ona-network-check.sh --scm github.com --scm gitlab.company.com
 #
-# Documentation: https://ona.com/docs/ona/runners/aws/detailed-access-requirements
+# Documentation:
+#   AWS: https://ona.com/docs/ona/runners/aws/detailed-access-requirements
+#   GCP: https://ona.com/docs/ona/runners/gcp/detailed-access-requirements
 #
 
 set -o pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 # ANSI colors
 GREEN="\033[92m"
@@ -40,7 +44,11 @@ WARN_TESTS=0
 VERBOSE=0
 REGION=""
 ACCOUNT_ID=""
+PROVIDER=""
+PROJECT_ID=""
+GCP_REGION=""
 SKIP_AWS=0
+SKIP_GCP=0
 SKIP_VSCODE=0
 SKIP_JETBRAINS=0
 SKIP_CURSOR=0
@@ -56,8 +64,19 @@ AWS_REGION_DETECTED=""
 AWS_ACCOUNT_DETECTED=""
 AWS_DETECTION_METHOD="none"
 
-# Test results storage (for JSON export)
+# GCP Context
+GCP_PROJECT_DETECTED=""
+GCP_REGION_DETECTED=""
+GCP_ZONE_DETECTED=""
+GCP_DETECTION_METHOD="none"
+
+# Resolved provider
+RESOLVED_PROVIDER=""
+
+# Test results storage (for JSON export — now using categories structure)
 declare -a TEST_RESULTS_JSON=()
+declare -a CATEGORY_NAMES=()
+declare -a CATEGORY_BOUNDARIES=()
 CURRENT_CATEGORY=""
 
 # =============================================================================
@@ -134,6 +153,8 @@ print_header() {
     echo -e "${BOLD}$1${RESET}"
     echo "──────────────────────────────────────────────────────────────────"
     CURRENT_CATEGORY="$1"
+    CATEGORY_NAMES+=("$1")
+    CATEGORY_BOUNDARIES+=(${#TEST_RESULTS_JSON[@]})
 }
 
 print_test() {
@@ -397,11 +418,6 @@ get_jetbrains_endpoints() {
     echo "https://account.jetbrains.com"
 }
 
-get_release_endpoints() {
-    echo "https://releases.gitpod.io/ec2/stable/manifest.json"
-    echo "https://releases.gitpod.io/cli/stable/manifest.json"
-}
-
 get_registry_endpoints() {
     echo "https://mcr.microsoft.com"
     echo "https://index.docker.io"
@@ -431,6 +447,124 @@ get_aws_endpoints() {
     for svc in "${services[@]}"; do
         echo "https://${svc}.${region}.amazonaws.com"
     done
+}
+
+get_aws_release_endpoints() {
+    echo "https://releases.gitpod.io/ec2/stable/manifest.json"
+}
+
+get_release_endpoints() {
+    echo "https://releases.gitpod.io/cli/stable/manifest.json"
+}
+
+get_gcp_endpoints() {
+    # Core GCP Services
+    echo "https://compute.googleapis.com"
+    echo "https://storage.googleapis.com"
+    echo "https://artifactregistry.googleapis.com"
+    echo "https://secretmanager.googleapis.com"
+    echo "https://logging.googleapis.com"
+    echo "https://monitoring.googleapis.com"
+    # Supporting GCP Services
+    echo "https://redis.googleapis.com"
+    echo "https://run.googleapis.com"
+    echo "https://pubsub.googleapis.com"
+    echo "https://cloudfunctions.googleapis.com"
+    # Required APIs
+    echo "https://iam.googleapis.com"
+    echo "https://iamcredentials.googleapis.com"
+    echo "https://cloudresourcemanager.googleapis.com"
+    echo "https://vpcaccess.googleapis.com"
+    echo "https://servicenetworking.googleapis.com"
+    echo "https://cloudkms.googleapis.com"
+}
+
+test_gcp_metadata() {
+    local url="http://metadata.google.internal/computeMetadata/v1/project/project-id"
+    local cmd="curl -s -H 'Metadata-Flavor: Google' --connect-timeout 2 -o /dev/null -w '%{http_code}' $url"
+    
+    local response
+    response=$(curl -s -H "Metadata-Flavor: Google" --connect-timeout 2 \
+                    -o /dev/null -w "%{http_code}" "$url" 2>&1)
+    local exit_code=$?
+    
+    if [ $exit_code -ne 0 ]; then
+        print_test "GCP Metadata Service (metadata.google.internal)" "warn" \
+            "(not reachable — expected if not on GCP VM)"
+        store_test_result "GCP Metadata Service" "metadata.google.internal" "warn" \
+            "not reachable — expected if not on GCP VM" "$cmd" "null" "" "" ""
+        return 0
+    fi
+    
+    if [[ "$response" =~ ^2 ]]; then
+        print_test "GCP Metadata Service (metadata.google.internal)" "pass" "(reachable, $response)"
+        store_test_result "GCP Metadata Service" "metadata.google.internal" "pass" \
+            "reachable, $response" "$cmd" "null" "" "" ""
+        return 0
+    else
+        print_test "GCP Metadata Service (metadata.google.internal)" "fail" "(HTTP $response)"
+        store_test_result "GCP Metadata Service" "metadata.google.internal" "fail" \
+            "HTTP $response" "$cmd" "null" \
+            "VMs cannot access service account tokens or instance metadata" \
+            "Ensure the GCP metadata server (169.254.169.254) is not blocked|Verify firewall rules allow access to metadata.google.internal" \
+            "https://ona.com/docs/ona/runners/gcp/detailed-access-requirements"
+        return 1
+    fi
+}
+
+test_gcp_image_access() {
+    # Check if gcloud is available
+    if ! command -v gcloud &> /dev/null; then
+        print_test "GCP Image Access (gcloud CLI)" "warn" "(gcloud not available — cannot validate)"
+        store_test_result "GCP Image Access" "gcloud CLI" "warn" \
+            "gcloud not available — cannot validate" "gcloud --version" "null" "" "" ""
+        return 0
+    fi
+    
+    # Test cos-cloud (public) — fail if blocked
+    local cos_output
+    cos_output=$(gcloud compute images list --project=cos-cloud \
+                 --filter="family:cos-stable" --limit=1 --format="value(name)" 2>&1)
+    local cos_exit=$?
+    
+    if [ $cos_exit -eq 0 ] && [ -n "$cos_output" ]; then
+        print_test "COS Image Access (cos-cloud/cos-stable)" "pass" "(accessible: ${cos_output:0:40})"
+        store_test_result "COS Image Access" "cos-cloud/cos-stable" "pass" \
+            "accessible: ${cos_output:0:40}" "gcloud compute images list --project=cos-cloud" "null" "" "" ""
+    else
+        print_test "COS Image Access (cos-cloud/cos-stable)" "fail" "(access denied)"
+        local remediation_steps="Add 'projects/cos-cloud' to your organization's compute.trustedImageProjects policy|Run: gcloud resource-manager org-policies allow compute.trustedImageProjects projects/cos-cloud"
+        store_test_result "COS Image Access" "cos-cloud/cos-stable" "fail" \
+            "Cannot access Container-Optimized OS images" \
+            "gcloud compute images list --project=cos-cloud" "null" \
+            "Runner orchestrator VMs cannot be created" \
+            "$remediation_steps" \
+            "https://ona.com/docs/ona/runners/gcp/detailed-access-requirements"
+        print_remediation "Runner orchestrator VMs cannot be created" \
+            "Add 'projects/cos-cloud' to your organization's compute.trustedImageProjects policy" \
+            "Run: gcloud resource-manager org-policies allow compute.trustedImageProjects projects/cos-cloud"
+    fi
+    
+    # Test gitpod-next-production (Ona images) — warn if blocked (not publicly listable)
+    local ona_output
+    ona_output=$(gcloud compute images list --project=gitpod-next-production \
+                 --filter="name~ona-environment" --limit=1 --format="value(name)" 2>&1)
+    local ona_exit=$?
+    
+    if [ $ona_exit -eq 0 ] && [ -n "$ona_output" ]; then
+        print_test "Ona Environment Image Access (gitpod-next-production)" "pass" "(accessible: ${ona_output:0:40})"
+        store_test_result "Ona Environment Image Access" "gitpod-next-production/ona-environment-*" "pass" \
+            "accessible: ${ona_output:0:40}" "gcloud compute images list --project=gitpod-next-production" "null" "" "" ""
+    else
+        print_test "Ona Environment Image Access (gitpod-next-production)" "warn" "(may not be publicly listable)"
+        local remediation_steps="Add 'projects/gitpod-next-production' to your organization's compute.trustedImageProjects policy|Contact Ona support if you need assistance with image access"
+        store_test_result "Ona Environment Image Access" "gitpod-next-production/ona-environment-*" "warn" \
+            "Cannot list Ona environment images (may not be publicly listable)" \
+            "gcloud compute images list --project=gitpod-next-production" "null" \
+            "Environment VMs may fail to launch if org policy blocks this project" \
+            "$remediation_steps" \
+            "https://ona.com/docs/ona/runners/gcp/detailed-access-requirements"
+    fi
 }
 
 # =============================================================================
@@ -473,8 +607,126 @@ detect_aws_context() {
 }
 
 # =============================================================================
+# GCP Context Detection
+# =============================================================================
+
+detect_gcp_context() {
+    # Check CLI argument (already set via PROJECT_ID variable)
+    if [ -n "$PROJECT_ID" ]; then
+        GCP_PROJECT_DETECTED="$PROJECT_ID"
+        GCP_DETECTION_METHOD="cli_argument"
+        [ -n "$GCP_REGION" ] && GCP_REGION_DETECTED="$GCP_REGION"
+        return
+    fi
+    
+    # Check environment variables
+    if [ -n "$GOOGLE_CLOUD_PROJECT" ]; then
+        GCP_PROJECT_DETECTED="$GOOGLE_CLOUD_PROJECT"
+        GCP_DETECTION_METHOD="environment_variable"
+        [ -n "$CLOUDSDK_COMPUTE_REGION" ] && GCP_REGION_DETECTED="$CLOUDSDK_COMPUTE_REGION"
+        [ -n "$CLOUDSDK_COMPUTE_ZONE" ] && GCP_ZONE_DETECTED="$CLOUDSDK_COMPUTE_ZONE"
+        return
+    elif [ -n "$GCLOUD_PROJECT" ]; then
+        GCP_PROJECT_DETECTED="$GCLOUD_PROJECT"
+        GCP_DETECTION_METHOD="environment_variable"
+        return
+    fi
+    
+    # Try GCP metadata server
+    local project
+    project=$(curl -s --connect-timeout 2 -H "Metadata-Flavor: Google" \
+              "http://metadata.google.internal/computeMetadata/v1/project/project-id" 2>/dev/null)
+    if [ $? -eq 0 ] && [ -n "$project" ] && [[ ! "$project" =~ ^\<! ]]; then
+        GCP_PROJECT_DETECTED="$project"
+        GCP_DETECTION_METHOD="metadata_server"
+        # Try to get zone from metadata
+        local zone_path
+        zone_path=$(curl -s --connect-timeout 2 -H "Metadata-Flavor: Google" \
+                    "http://metadata.google.internal/computeMetadata/v1/instance/zone" 2>/dev/null)
+        if [ $? -eq 0 ] && [ -n "$zone_path" ]; then
+            GCP_ZONE_DETECTED="${zone_path##*/}"
+            # Derive region from zone (e.g., us-central1-a -> us-central1)
+            if [ -n "$GCP_ZONE_DETECTED" ] && [ -z "$GCP_REGION_DETECTED" ]; then
+                GCP_REGION_DETECTED=$(echo "$GCP_ZONE_DETECTED" | sed 's/-[a-z]$//')
+            fi
+        fi
+        return
+    fi
+    
+    # Try gcloud CLI
+    if command -v gcloud &> /dev/null; then
+        local gcloud_project
+        gcloud_project=$(gcloud config get-value project 2>/dev/null)
+        if [ $? -eq 0 ] && [ -n "$gcloud_project" ]; then
+            GCP_PROJECT_DETECTED="$gcloud_project"
+            GCP_DETECTION_METHOD="gcloud_cli"
+            if [ -z "$GCP_REGION_DETECTED" ]; then
+                local gcloud_region
+                gcloud_region=$(gcloud config get-value compute/region 2>/dev/null)
+                [ $? -eq 0 ] && [ -n "$gcloud_region" ] && GCP_REGION_DETECTED="$gcloud_region"
+            fi
+        fi
+    fi
+}
+
+detect_provider_auto() {
+    # Auto-detect cloud provider from metadata services.
+    # GCP is probed first (unambiguous due to Metadata-Flavor header).
+    local detected=()
+    
+    # Probe GCP first
+    local gcp_result
+    gcp_result=$(curl -s --connect-timeout 2 -H "Metadata-Flavor: Google" \
+                 "http://metadata.google.internal/computeMetadata/v1/project/project-id" 2>/dev/null)
+    if [ $? -eq 0 ] && [ -n "$gcp_result" ] && [[ ! "$gcp_result" =~ ^\<! ]]; then
+        detected+=("gcp")
+    fi
+    
+    # Probe AWS
+    local aws_result
+    aws_result=$(curl -s --connect-timeout 2 \
+                 "http://169.254.169.254/latest/meta-data/placement/region" 2>/dev/null)
+    if [ $? -eq 0 ] && [ -n "$aws_result" ] && [[ ! "$aws_result" =~ ^\<\? ]]; then
+        detected+=("aws")
+    fi
+    
+    if [ ${#detected[@]} -eq 2 ]; then
+        echo "both"
+    elif [ ${#detected[@]} -eq 1 ]; then
+        echo "${detected[0]}"
+    else
+        echo "skip"
+    fi
+}
+
+# =============================================================================
 # Interactive Prompts
 # =============================================================================
+
+prompt_for_provider() {
+    echo ""
+    echo "──────────────────────────────────────────────────────────────────"
+    echo "Cloud Provider"
+    echo "──────────────────────────────────────────────────────────────────"
+    echo ""
+    echo "Which cloud provider is your runner deployed on?"
+    echo "  1. AWS"
+    echo "  2. GCP"
+    echo "  3. Both"
+    echo "  4. Skip cloud-specific tests"
+    echo ""
+    
+    read -p "Enter choice (1-4): " choice
+    
+    case "$choice" in
+        1) RESOLVED_PROVIDER="aws" ;;
+        2) RESOLVED_PROVIDER="gcp" ;;
+        3) RESOLVED_PROVIDER="both" ;;
+        4) RESOLVED_PROVIDER="skip" ;;
+        *) echo "  Invalid choice, defaulting to AWS."
+           RESOLVED_PROVIDER="aws" ;;
+    esac
+}
 
 prompt_for_scm() {
     echo ""
@@ -548,11 +800,12 @@ prompt_for_internal_registry() {
     echo "  2. Nexus Repository"
     echo "  3. Harbor"
     echo "  4. AWS ECR (private)"
-    echo "  5. Other internal registry"
-    echo "  6. No / Use public registries only"
+    echo "  5. Google Artifact Registry"
+    echo "  6. Other internal registry"
+    echo "  7. No / Use public registries only"
     echo ""
     
-    read -p "Enter choice (1-6): " choice
+    read -p "Enter choice (1-7): " choice
     
     case "$choice" in
         1)
@@ -572,10 +825,14 @@ prompt_for_internal_registry() {
             [ -n "$url" ] && INTERNAL_REGISTRY="$url"
             ;;
         5)
+            read -p "  Enter Artifact Registry URL (e.g., us-central1-docker.pkg.dev/my-project/my-repo): " url
+            [ -n "$url" ] && INTERNAL_REGISTRY="$url"
+            ;;
+        6)
             read -p "  Enter registry URL: " url
             [ -n "$url" ] && INTERNAL_REGISTRY="$url"
             ;;
-        6|"")
+        7|"")
             echo "  Using public registries only."
             return
             ;;
@@ -723,9 +980,37 @@ run_tests() {
             while IFS= read -r url; do
                 test_endpoint "$url" "true" "10" "Runner deployment will fail, AWS resources won't be accessible" "$remediation_steps" "$remediation_ref"
             done < <(get_aws_endpoints "$AWS_REGION_DETECTED")
+            # AWS-specific release artifact
+            while IFS= read -r url; do
+                test_endpoint "$url"
+            done < <(get_aws_release_endpoints)
         else
             echo ""
             echo "ℹ️  AWS region not detected. Use --region to test AWS endpoints."
+        fi
+    fi
+    
+    # GCP Services
+    if [ "$SKIP_GCP" -eq 0 ]; then
+        if [ -n "$GCP_PROJECT_DETECTED" ]; then
+            print_header "GCP Services (Project: $GCP_PROJECT_DETECTED)"
+            local remediation_ref="https://ona.com/docs/ona/runners/gcp/detailed-access-requirements"
+            while IFS= read -r url; do
+                local svc="${url#https://}"
+                local remediation_steps="Enable the required API: gcloud services enable ${svc}|Ensure firewall rules allow outbound to GCP API endpoints"
+                test_endpoint "$url" "true" "10" "Runner deployment will fail, GCP resources won't be accessible" "$remediation_steps" "$remediation_ref"
+            done < <(get_gcp_endpoints)
+            
+            # GCP Metadata Service
+            print_header "GCP Metadata Service"
+            test_gcp_metadata
+            
+            # GCP Image Access
+            print_header "GCP Image Access"
+            test_gcp_image_access
+        else
+            echo ""
+            echo "ℹ️  GCP project not detected. Use --project-id to test GCP endpoints."
         fi
     fi
     
@@ -787,33 +1072,79 @@ save_json_report() {
     # Get timestamp in ISO 8601 format
     local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     
+    # Build aws_context
+    local aws_ctx="null"
+    if [ "$RESOLVED_PROVIDER" = "aws" ] || [ "$RESOLVED_PROVIDER" = "both" ]; then
+        aws_ctx=$(cat <<AWSEOF
+{
+    "region": $([ -n "$AWS_REGION_DETECTED" ] && echo "\"$AWS_REGION_DETECTED\"" || echo "null"),
+    "account_id": $([ -n "$AWS_ACCOUNT_DETECTED" ] && echo "\"$AWS_ACCOUNT_DETECTED\"" || echo "null"),
+    "detection_method": "$AWS_DETECTION_METHOD"
+  }
+AWSEOF
+)
+    fi
+    
+    # Build gcp_context
+    local gcp_ctx="null"
+    if [ "$RESOLVED_PROVIDER" = "gcp" ] || [ "$RESOLVED_PROVIDER" = "both" ]; then
+        gcp_ctx=$(cat <<GCPEOF
+{
+    "project_id": $([ -n "$GCP_PROJECT_DETECTED" ] && echo "\"$GCP_PROJECT_DETECTED\"" || echo "null"),
+    "region": $([ -n "$GCP_REGION_DETECTED" ] && echo "\"$GCP_REGION_DETECTED\"" || echo "null"),
+    "zone": $([ -n "$GCP_ZONE_DETECTED" ] && echo "\"$GCP_ZONE_DETECTED\"" || echo "null"),
+    "detection_method": "$GCP_DETECTION_METHOD"
+  }
+GCPEOF
+)
+    fi
+    
     # Start JSON document
     cat > "$filepath" << EOF
 {
   "version": "$VERSION",
   "timestamp": "$timestamp",
-  "aws_context": {
-    "region": $([ -n "$AWS_REGION_DETECTED" ] && echo "\"$AWS_REGION_DETECTED\"" || echo "null"),
-    "account_id": $([ -n "$AWS_ACCOUNT_DETECTED" ] && echo "\"$AWS_ACCOUNT_DETECTED\"" || echo "null"),
-    "detection_method": "$AWS_DETECTION_METHOD"
-  },
+  "provider": "$RESOLVED_PROVIDER",
+  "aws_context": $aws_ctx,
+  "gcp_context": $gcp_ctx,
   "summary": {
     "total": $TOTAL_TESTS,
     "passed": $PASSED_TESTS,
     "failed": $FAILED_TESTS,
     "warnings": $WARN_TESTS
   },
-  "tests": [
+  "categories": [
 EOF
     
-    # Add test results
-    local first=1
-    for result in "${TEST_RESULTS_JSON[@]}"; do
-        if [ $first -eq 0 ]; then
-            echo "," >> "$filepath"
+    # Build categories from tracked boundaries
+    local num_categories=${#CATEGORY_NAMES[@]}
+    local total_results=${#TEST_RESULTS_JSON[@]}
+    
+    local cat_first=1
+    for ((ci=0; ci<num_categories; ci++)); do
+        local cat_name="${CATEGORY_NAMES[$ci]}"
+        local start_idx=${CATEGORY_BOUNDARIES[$ci]}
+        local end_idx
+        if [ $((ci + 1)) -lt $num_categories ]; then
+            end_idx=${CATEGORY_BOUNDARIES[$((ci + 1))]}
+        else
+            end_idx=$total_results
         fi
-        echo "    $result" >> "$filepath"
-        first=0
+        
+        [ $cat_first -eq 0 ] && echo "," >> "$filepath"
+        cat_first=0
+        
+        cat_name=$(json_escape "$cat_name")
+        echo "    {\"name\": \"$cat_name\", \"tests\": [" >> "$filepath"
+        
+        local test_first=1
+        for ((ti=start_idx; ti<end_idx; ti++)); do
+            [ $test_first -eq 0 ] && echo "," >> "$filepath"
+            test_first=0
+            echo "      ${TEST_RESULTS_JSON[$ti]}" >> "$filepath"
+        done
+        
+        echo "    ]}" >> "$filepath"
     done
     
     # Close JSON document
@@ -856,8 +1187,19 @@ print_summary() {
     echo "Ensure connectivity from user locations via VPN, Direct Connect, or Transit Gateway."
     echo "Verify with:  nslookup <your-runner-domain> && curl -k https://<your-runner-domain>/_health"
     
-    echo ""
-    echo "Documentation: https://ona.com/docs/ona/runners/aws/detailed-access-requirements"
+    # Provider-aware documentation links
+    if [ "$RESOLVED_PROVIDER" = "aws" ] || [ "$RESOLVED_PROVIDER" = "both" ]; then
+        echo ""
+        echo "AWS Documentation: https://ona.com/docs/ona/runners/aws/detailed-access-requirements"
+    fi
+    if [ "$RESOLVED_PROVIDER" = "gcp" ] || [ "$RESOLVED_PROVIDER" = "both" ]; then
+        echo ""
+        echo "GCP Documentation: https://ona.com/docs/ona/runners/gcp/detailed-access-requirements"
+    fi
+    if [ "$RESOLVED_PROVIDER" != "aws" ] && [ "$RESOLVED_PROVIDER" != "gcp" ] && [ "$RESOLVED_PROVIDER" != "both" ]; then
+        echo ""
+        echo "Documentation: https://ona.com/docs/ona/runners/aws/detailed-access-requirements"
+    fi
     echo ""
 }
 
@@ -872,13 +1214,17 @@ Ona Network Connectivity Diagnostic Tool v$VERSION
 Usage: $0 [OPTIONS]
 
 Options:
+  --provider PROVIDER      Cloud provider: aws, gcp, or both (auto-detected if not set)
   --region REGION          AWS region (e.g., us-east-1)
   --account-id ID          AWS account ID
+  --project-id ID          GCP project ID (auto-detected if not provided)
+  --gcp-region REGION      GCP region (auto-detected if not provided)
   --scm URL                SCM provider URL (can be specified multiple times)
   --sso URL                SSO provider URL (e.g., mycompany.okta.com)
   --internal-registry URL  Internal container registry URL
   --test-url URL           Additional URL to test (can be specified multiple times)
   --skip-aws               Skip AWS endpoint tests
+  --skip-gcp               Skip GCP endpoint tests
   --skip-vscode            Skip VS Code endpoint tests
   --skip-jetbrains         Skip JetBrains endpoint tests
   --skip-cursor            Skip Cursor editor endpoint tests
@@ -889,7 +1235,9 @@ Options:
 
 Examples:
   $0
-  $0 --region us-east-1 --verbose
+  $0 --provider aws --region us-east-1 --verbose
+  $0 --provider gcp --project-id my-project
+  $0 --provider both
   $0 --scm github.com --scm gitlab.company.com
   $0 --sso mycompany.okta.com --json report.json
 
@@ -926,8 +1274,24 @@ while [[ $# -gt 0 ]]; do
             TEST_URLS+=("$2")
             shift 2
             ;;
+        --provider)
+            PROVIDER="$2"
+            shift 2
+            ;;
+        --project-id)
+            PROJECT_ID="$2"
+            shift 2
+            ;;
+        --gcp-region)
+            GCP_REGION="$2"
+            shift 2
+            ;;
         --skip-aws)
             SKIP_AWS=1
+            shift
+            ;;
+        --skip-gcp)
+            SKIP_GCP=1
             shift
             ;;
         --skip-vscode)
@@ -968,6 +1332,55 @@ done
 # Main
 # =============================================================================
 
+resolve_provider() {
+    # Explicit --provider flag takes precedence
+    if [ -n "$PROVIDER" ]; then
+        RESOLVED_PROVIDER="$PROVIDER"
+        return
+    fi
+    
+    # If both skip flags are set, skip cloud tests
+    if [ "$SKIP_AWS" -eq 1 ] && [ "$SKIP_GCP" -eq 1 ]; then
+        RESOLVED_PROVIDER="skip"
+        return
+    fi
+    
+    # If one skip flag is set, use the other provider
+    if [ "$SKIP_AWS" -eq 1 ] && [ "$SKIP_GCP" -eq 0 ]; then
+        RESOLVED_PROVIDER="gcp"
+        return
+    fi
+    if [ "$SKIP_GCP" -eq 1 ] && [ "$SKIP_AWS" -eq 0 ]; then
+        RESOLVED_PROVIDER="aws"
+        return
+    fi
+    
+    # If cloud-specific CLI args are given, infer provider
+    if [ -n "$REGION" ] || [ -n "$ACCOUNT_ID" ]; then
+        if [ -n "$PROJECT_ID" ]; then
+            RESOLVED_PROVIDER="both"
+        else
+            RESOLVED_PROVIDER="aws"
+        fi
+        return
+    fi
+    if [ -n "$PROJECT_ID" ]; then
+        RESOLVED_PROVIDER="gcp"
+        return
+    fi
+    
+    # Interactive prompt if stdin is a TTY
+    if [ -t 0 ]; then
+        prompt_for_provider
+        return
+    fi
+    
+    # Non-interactive: auto-detect
+    echo ""
+    echo "ℹ️  Auto-detecting cloud provider..."
+    RESOLVED_PROVIDER=$(detect_provider_auto)
+}
+
 main() {
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -985,16 +1398,51 @@ main() {
         exit 1
     fi
     
-    # Detect AWS context
-    detect_aws_context
+    # Determine provider
+    resolve_provider
     
-    if [ -n "$AWS_REGION_DETECTED" ]; then
-        echo ""
-        echo "AWS region: $AWS_REGION_DETECTED (detected via $AWS_DETECTION_METHOD)"
-        [ -n "$AWS_ACCOUNT_DETECTED" ] && echo "AWS account: $AWS_ACCOUNT_DETECTED"
-    elif [ "$SKIP_AWS" -eq 0 ]; then
-        echo ""
-        echo "⚠️  AWS region not detected. Use --region or --skip-aws"
+    # Set skip flags based on resolved provider
+    case "$RESOLVED_PROVIDER" in
+        aws)  SKIP_AWS=0; SKIP_GCP=1 ;;
+        gcp)  SKIP_AWS=1; SKIP_GCP=0 ;;
+        both) SKIP_AWS=0; SKIP_GCP=0 ;;
+        skip) SKIP_AWS=1; SKIP_GCP=1 ;;
+    esac
+    
+    # Detect AWS context
+    if [ "$SKIP_AWS" -eq 0 ]; then
+        detect_aws_context
+        if [ -n "$AWS_REGION_DETECTED" ]; then
+            echo ""
+            echo "ℹ️  AWS region: $AWS_REGION_DETECTED (detected via $AWS_DETECTION_METHOD)"
+            [ -n "$AWS_ACCOUNT_DETECTED" ] && echo "ℹ️  AWS account: $AWS_ACCOUNT_DETECTED"
+        else
+            if [ "$RESOLVED_PROVIDER" = "both" ]; then
+                echo ""
+                echo "⚠️  AWS region not detected — skipping AWS tests. Use --region to specify."
+            else
+                echo ""
+                echo "⚠️  AWS region not detected. Use --region or --skip-aws"
+            fi
+        fi
+    fi
+    
+    # Detect GCP context
+    if [ "$SKIP_GCP" -eq 0 ]; then
+        detect_gcp_context
+        if [ -n "$GCP_PROJECT_DETECTED" ]; then
+            echo ""
+            echo "ℹ️  GCP project: $GCP_PROJECT_DETECTED (detected via $GCP_DETECTION_METHOD)"
+            [ -n "$GCP_REGION_DETECTED" ] && echo "ℹ️  GCP region: $GCP_REGION_DETECTED"
+        else
+            if [ "$RESOLVED_PROVIDER" = "both" ]; then
+                echo ""
+                echo "⚠️  GCP project not detected — skipping GCP tests. Use --project-id to specify."
+            else
+                echo ""
+                echo "⚠️  GCP project not detected. Use --project-id or --skip-gcp"
+            fi
+        fi
     fi
     
     # Run tests
