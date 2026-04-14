@@ -12,10 +12,15 @@
 | Endpoint connectivity tests | ✅ | ✅ | Full support |
 | AWS region auto-detection | ✅ | ✅ | Full support |
 | AWS account detection | ✅ | ✅ | Via `aws sts get-caller-identity` |
+| GCP project auto-detection | ✅ | ✅ | Metadata, env vars, gcloud CLI |
+| GCP service endpoint tests | ✅ | ✅ | 16 global endpoints |
+| GCP metadata service test | ✅ | ✅ | With Metadata-Flavor header |
+| GCP image access validation | ✅ | ✅ | cos-cloud + gitpod-next-production |
+| Cloud provider selection | ✅ | ✅ | Interactive + --provider flag |
 | SCM provider testing | ✅ | ✅ | GitHub, GitLab, Bitbucket, Azure DevOps |
 | Interactive SCM prompt | ✅ | ✅ | Full support |
 | Internal registry testing | ✅ | ✅ | Full support |
-| Internal registry prompt | ✅ | ✅ | Artifactory, Nexus, Harbor, ECR |
+| Internal registry prompt | ✅ | ✅ | Artifactory, Nexus, Harbor, ECR, Artifact Registry |
 | SSO provider testing | ✅ | ✅ | Full support |
 | SSO provider prompt | ✅ | ✅ | Okta, Azure AD, Google Workspace |
 | Custom URL testing | ✅ | ✅ | Via `--test-url` flag |
@@ -38,32 +43,40 @@
 
 ### 📊 JSON Report Comparison
 
-Both versions now generate identical JSON structure:
+Both versions generate identical JSON structure using categories:
 
 ```json
 {
-  "version": "1.0.0",
-  "timestamp": "2026-02-06T10:44:09Z",
-  "aws_context": {
-    "region": "us-east-1",
-    "account_id": "123456789",
-    "detection_method": "environment_variable"
+  "version": "1.1.0",
+  "timestamp": "2026-04-07T10:30:00Z",
+  "provider": "gcp",
+  "aws_context": null,
+  "gcp_context": {
+    "project_id": "my-project-123",
+    "region": "us-central1",
+    "zone": null,
+    "detection_method": "cli_argument"
   },
   "summary": {
-    "total": 50,
-    "passed": 45,
-    "failed": 3,
+    "total": 31,
+    "passed": 28,
+    "failed": 1,
     "warnings": 2
   },
-  "tests": [
+  "categories": [
     {
-      "name": "HTTP/2 Support",
-      "endpoint": "https://app.gitpod.io",
-      "status": "pass",
-      "message": "HTTP/2 enabled",
-      "command": "curl --http2 ...",
-      "latency_ms": 123.45,
-      "remediation": null
+      "name": "Protocol Validation",
+      "tests": [
+        {
+          "name": "HTTP/2 Support",
+          "endpoint": "https://app.gitpod.io",
+          "status": "pass",
+          "message": "HTTP/2 enabled",
+          "command": "curl --http2 ...",
+          "latency_ms": 123.45,
+          "remediation": null
+        }
+      ]
     }
   ]
 }
@@ -96,8 +109,8 @@ Both versions now generate identical JSON structure:
 
 | Version | Lines | Complexity |
 |---------|-------|------------|
-| Python | 959 | Higher (dataclasses, type hints) |
-| Bash | ~650 | Lower (simpler data structures) |
+| Python | ~1500 | Higher (dataclasses, type hints) |
+| Bash | ~1460 | Lower (simpler data structures) |
 
 ## Recommendations
 
@@ -135,10 +148,10 @@ python3 process_report.py report.json  # Works with both versions
 
 ## Conclusion
 
-The bash version has achieved **~95% feature parity** with the Python version. The main differences are:
+The bash version has achieved **~95% feature parity** with the Python version. Both support AWS and GCP cloud providers. The main differences are:
 
 1. **Output formatting**: Bash uses basic ANSI colors vs Rich library
 2. **Code structure**: Bash is less modular but still maintainable
 3. **Dependencies**: Bash requires `bc` for latency (optional)
 
-Both versions are production-ready and generate identical JSON reports for automation.
+Both versions are production-ready and generate identical JSON reports (using the `categories` structure) for automation.

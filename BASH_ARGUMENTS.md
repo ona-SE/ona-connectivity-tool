@@ -2,6 +2,31 @@
 
 ## Complete Argument Reference
 
+### Cloud Provider Selection
+
+#### `--provider PROVIDER`
+Specify cloud provider: `aws`, `gcp`, or `both`. Auto-detected if not set.
+
+**Examples:**
+```bash
+./ona-network-check.sh --provider aws
+./ona-network-check.sh --provider gcp
+./ona-network-check.sh --provider both
+```
+
+**Auto-detection order:**
+1. `--provider` CLI argument (highest priority)
+2. `--skip-aws` / `--skip-gcp` flags
+3. Cloud-specific CLI args (`--region` implies AWS, `--project-id` implies GCP)
+4. Interactive prompt (if TTY)
+5. Metadata service probing (GCP first, then AWS)
+
+**When to use:**
+- Explicitly selecting which cloud tests to run
+- Avoiding interactive prompts in CI/CD
+
+---
+
 ### AWS Configuration
 
 #### `--region REGION`
@@ -44,6 +69,37 @@ Specify AWS account ID (included in JSON reports).
 - When AWS CLI is not configured
 - For documentation/reporting purposes
 - When you want to explicitly set the account ID
+
+---
+
+### GCP Configuration
+
+#### `--project-id ID`
+Specify GCP project ID for testing GCP service endpoints.
+
+**Examples:**
+```bash
+./ona-network-check.sh --project-id my-project-123
+./ona-network-check.sh --provider gcp --project-id my-project-123 --gcp-region us-central1
+```
+
+**Auto-detection order:**
+1. `--project-id` CLI argument (highest priority)
+2. `$GOOGLE_CLOUD_PROJECT` or `$GCLOUD_PROJECT` environment variable
+3. GCP metadata server (if running on GCP VM)
+4. `gcloud config get-value project`
+
+---
+
+#### `--gcp-region REGION`
+Specify GCP region (used for display and Artifact Registry URLs).
+
+**Examples:**
+```bash
+./ona-network-check.sh --provider gcp --project-id my-project --gcp-region us-central1
+```
+
+**Note:** GCP API endpoints are global (unlike AWS), so region is used for context/display only.
 
 ---
 
@@ -216,6 +272,22 @@ Skip all AWS service endpoint tests.
 - Not deploying to AWS
 - AWS connectivity not required
 - Faster testing when AWS is not relevant
+
+---
+
+#### `--skip-gcp`
+Skip all GCP service endpoint tests.
+
+**Examples:**
+```bash
+./ona-network-check.sh --skip-gcp
+./ona-network-check.sh --skip-gcp --skip-vscode
+```
+
+**When to use:**
+- Not deploying to GCP
+- GCP connectivity not required
+- Faster testing when GCP is not relevant
 
 ---
 
